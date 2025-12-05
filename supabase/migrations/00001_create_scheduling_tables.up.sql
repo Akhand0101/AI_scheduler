@@ -28,6 +28,7 @@ CREATE TABLE public.inquiries (
 
 COMMENT ON TABLE public.inquiries IS 'Tracks patient requests and the results of AI processing.';
 
+
 -- 3. Create the appointments table
 CREATE TABLE public.appointments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
