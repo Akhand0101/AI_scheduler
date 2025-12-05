@@ -32,17 +32,29 @@ export default function ChatWindow() {
 
   const sendToHandleChat = async (text: string) => {
     const functionsBase = import.meta.env.VITE_FUNCTIONS_BASE;
+    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
     if (!functionsBase) {
-      // Fallback for demo if env not set
       console.warn("VITE_FUNCTIONS_BASE not set, using mock response");
-      return new Promise(resolve => setTimeout(() => resolve({ extracted: null }), 1000));
+      return new Promise(resolve => setTimeout(() => resolve({ message: "Mock response: Env vars missing" }), 1000));
     }
 
     const res = await fetch(`${functionsBase}/handle-chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messageText: text, patientIdentifier: "anon-123" })
+      headers: { 
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${anonKey}` 
+      },
+      body: JSON.stringify({ 
+      userMessage: text,       // Changed from messageText
+      patientId: "anon-123"    // Changed from patientIdentifier
+    })
     });
+    
+    if (!res.ok) {
+        throw new Error(`Server error: ${res.status}`);
+    }
+
     return res.json();
   };
 
@@ -55,9 +67,14 @@ export default function ChatWindow() {
 
     try {
       const data: any = await sendToHandleChat(userMsg);
-      const reply = data?.extracted
-        ? `I've saved that information: ${JSON.stringify(data.extracted)}`
-        : "Thank you. Is there anything else I can help you with?";
+      
+      // FIX: Use the natural language 'message' from the AI
+      const reply = data?.message || "I processed that, but didn't get a specific response.";
+
+      // Debugging: Log the extracted data to console to verify it's working
+      if (data?.extractedData) {
+          console.log("AI Extracted:", data.extractedData);
+      }
 
       setMessages(prev => [...prev, { sender: "bot", text: reply }]);
     } catch (err: any) {
