@@ -21,17 +21,13 @@ export default function InquiryList() {
   useEffect(() => {
     const fetchData = async () => {
       setLoading(true);
-      const sessionResp = await supabase.auth.getSession();
-      const token = sessionResp.data.session?.access_token;
-      if (!token) { setLoading(false); return; }
-
       try {
-        const res = await fetch(`${import.meta.env.VITE_FUNCTIONS_BASE}/get-admin-data`, {
-          method: "GET",
-          headers: { Authorization: `Bearer ${token}` }
+        const { data, error } = await supabase.functions.invoke('get-admin-data', {
+          method: "GET"
         });
-        const json = await res.json();
-        setItems(json.inquiries || []);
+
+        if (error) throw error;
+        setItems(data.inquiries || []);
       } catch (err) {
         console.error(err);
       } finally {

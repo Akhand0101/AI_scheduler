@@ -3,10 +3,24 @@ import { supabase } from "../supabaseClient";
 import AdminLogin from "../components/AdminLogin";
 import InquiryList from "../components/InquiryList";
 import AppointmentList from "../components/AppointmentList";
-import { Box, Button, Typography, Paper, Container } from "@mui/material";
+import { Box, Button, Typography, Paper, Container, Chip } from "@mui/material";
 
 export default function AdminPage() {
   const [session, setSession] = useState<any>(null);
+  const [therapist, setTherapist] = useState<any>(null);
+
+  async function getAdminData() {
+    if (!session) return;
+    try {
+      const { data, error } = await supabase.functions.invoke('get-admin-data');
+      if (error) throw error;
+      if (data && data.length > 0) {
+        setTherapist(data[0]);
+      }
+    } catch (error) {
+      console.error("Error fetching admin data:", error);
+    }
+  }
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -15,6 +29,67 @@ export default function AdminPage() {
     });
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (session) {
+      getAdminData();
+    }
+  }, [session]);
+
+  const handleConnectCalendar = () => {
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+    if (!clientId) {
+      alert("Configuration Error: VITE_GOOGLE_CLIENT_ID is missing in your frontend .env file. Please add it to enable calendar integration.");
+      return;
+    }
+
+    // Redirect back to this page after Google login
+    const redirectUri = window.location.origin + '/admin';
+    const scope = 'https://www.googleapis.com/auth/calendar.events'; // Scope to manage events
+
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}&access_type=offline&prompt=consent`;
+
+    window.location.href = authUrl;
+  };
+
+  // Handle OAuth callback (checking for ?code= in URL)
+  useEffect(() => {
+    async function handleOAuthCallback() {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code');
+
+      if (code && session) {
+        // Clean URL to avoid re-triggering on refresh
+        window.history.replaceState({}, document.title, window.location.pathname);
+
+        try {
+          const redirectUri = window.location.origin + '/admin';
+          const { data, error } = await supabase.functions.invoke('oauth-callback', {
+            body: { code, redirect_uri: redirectUri }
+          });
+
+          if (error) throw error;
+
+          alert("Calendar connected successfully!");
+          // Refresh admin data to show "Connected" status
+          getAdminData();
+
+        } catch (error: any) {
+          console.error("OAuth Error:", error);
+          alert(`Failed to connect calendar: ${error.message || error}`);
+        }
+      }
+    }
+
+    if (session) {
+      handleOAuthCallback();
+    }
+  }, [session]);
+
+  const handleDisconnectCalendar = async () => {
+    // TODO: Implement disconnect logic
+    console.log("Disconnecting calendar...");
+  };
 
   if (!session) {
     return (
@@ -42,6 +117,32 @@ export default function AdminPage() {
           Logout
         </Button>
       </Box>
+
+      <Paper elevation={0} sx={{ p: 3, mb: 4, border: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Box>
+          <Typography variant="h6" gutterBottom sx={{ fontWeight: 600 }}>Calendar Sync</Typography>
+          <Typography variant="body2" color="text.secondary">
+            {therapist?.google_refresh_token
+              ? "Your Google Calendar is synced."
+              : "Connect your Google Calendar to sync appointments automatically."}
+          </Typography>
+        </Box>
+        {therapist?.google_refresh_token ? (
+          <Chip
+            label="Connected"
+            color="success"
+            onDelete={handleDisconnectCalendar} // Using onDelete to get a nice "X" icon
+            variant="outlined"
+          />
+        ) : (
+          <Button
+            variant="contained"
+            onClick={handleConnectCalendar}
+          >
+            Connect Google Calendar
+          </Button>
+        )}
+      </Paper>
 
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         <Paper elevation={0} sx={{ p: 3, border: '1px solid', borderColor: 'divider' }}>

@@ -1,13 +1,17 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+// Setup type definitions for built-in Supabase Runtime APIs
+import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+import { createClient } from "jsr:@supabase/supabase-js@2"
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+Deno.serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
 
   try {
     // 1. Initialize Supabase Client
@@ -17,7 +21,7 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
     // 2. Authenticate User
-    // Get the JWT token from the Authorization header [cite: 213]
+    // Get the JWT token from the Authorization header
     const authHeader = req.headers.get('Authorization')
     if (!authHeader) {
       throw new Error('Missing Authorization header')
@@ -37,7 +41,7 @@ serve(async (req) => {
     // (Optional) Check for specific admin role/email if you want to restrict further
     // if (user.email !== 'admin@example.com') { ... }
 
-    // 3. Fetch Data [cite: 217]
+    // 3. Fetch Data
     // We can use Promise.all to fetch both tables in parallel for speed
     const [inquiriesResponse, appointmentsResponse] = await Promise.all([
       supabase
@@ -47,7 +51,7 @@ serve(async (req) => {
           therapists ( name ) 
         `)
         .order('created_at', { ascending: false }),
-        
+
       supabase
         .from('appointments')
         .select(`
@@ -60,7 +64,7 @@ serve(async (req) => {
     if (inquiriesResponse.error) throw inquiriesResponse.error
     if (appointmentsResponse.error) throw appointmentsResponse.error
 
-    // 4. Return Combined Data [cite: 218]
+    // 4. Return Combined Data
     return new Response(
       JSON.stringify({
         inquiries: inquiriesResponse.data,
@@ -72,7 +76,7 @@ serve(async (req) => {
       }
     )
 
-  } catch (error) {
+  } catch (error: any) {
     return new Response(
       JSON.stringify({ error: error.message }),
       {

@@ -1,12 +1,17 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+// Setup type definitions for built-in Supabase Runtime APIs
+import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+import { createClient } from "jsr:@supabase/supabase-js@2"
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+Deno.serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
 
   try {
     // 1. Initialize Supabase
@@ -21,63 +26,72 @@ serve(async (req) => {
       throw new Error("Missing required appointment details.")
     }
 
-    // 3. Fetch Therapist Credentials (Refresh Token)
+    // 3. Fetch Therapist Credentials
     const { data: therapist, error: therapistError } = await supabase
       .from('therapists')
       .select('google_refresh_token, google_calendar_id')
       .eq('id', therapistId)
       .single()
 
-    if (therapistError || !therapist?.google_refresh_token) {
-      throw new Error("Therapist calendar not connected.")
+    if (therapistError) {
+      throw new Error(`Therapist not found: ${therapistError.message}`)
     }
-
-    // 4. Get Google Access Token (using Refresh Token)
-    const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
-    const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
     
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: clientId!,
-        client_secret: clientSecret!,
-        refresh_token: therapist.google_refresh_token,
-        grant_type: 'refresh_token',
-      }),
-    })
+    let googleCalendarEventId: string | null = null;
 
-    const tokenData = await tokenResponse.json()
-    if (!tokenData.access_token) {
-      console.error("Token Error:", tokenData)
-      throw new Error("Failed to refresh Google access token")
-    }
+    // Steps 4 & 5: Only run if a refresh token is available
+    if (therapist?.google_refresh_token) {
+      try {
+        // 4. Get Google Access Token
+        const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
+        const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
 
-    // 5. Create Event on Google Calendar
-    const calendarId = therapist.google_calendar_id || 'primary'
-    const eventBody = {
-      summary: `Therapy Session with ${patientName || 'Patient'}`,
-      description: `Inquiry ID: ${inquiryId}`,
-      start: { dateTime: startTime }, // ISO format: "2023-10-27T10:00:00Z"
-      end: { dateTime: endTime },
-    }
+        const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: clientId!,
+            client_secret: clientSecret!,
+            refresh_token: therapist.google_refresh_token,
+            grant_type: 'refresh_token',
+          }),
+        })
 
-    const calendarResponse = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${tokenData.access_token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(eventBody),
+        const tokenData = await tokenResponse.json()
+        if (!tokenData.access_token) throw new Error("Failed to refresh Google access token")
+
+        // 5. Create Event on Google Calendar
+        const calendarId = therapist.google_calendar_id || 'primary'
+        const eventBody = {
+          summary: `Therapy Session with ${patientName || 'Patient'}`,
+          description: `Inquiry ID: ${inquiryId}`,
+          start: { dateTime: startTime },
+          end: { dateTime: endTime },
+        }
+
+        const calendarResponse = await fetch(
+          `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${tokenData.access_token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(eventBody),
+          }
+        )
+
+        const eventData = await calendarResponse.json()
+        if (!eventData.id) throw new Error("Failed to create Google Calendar event")
+        
+        googleCalendarEventId = eventData.id;
+
+      } catch (e) {
+        console.warn(`Google Calendar integration failed for therapist ${therapistId}. Proceeding without it. Error: ${e.message}`);
+        // Do not re-throw, allow booking to proceed without calendar event
       }
-    )
-
-    const eventData = await calendarResponse.json()
-    if (!eventData.id) {
-      console.error("Calendar Error:", eventData)
-      throw new Error("Failed to create Google Calendar event")
+    } else {
+      console.warn(`[WARINING] Therapist ${therapistId} has no Google Calendar refresh token. Skipping event creation. proceeding with appointment.`);
     }
 
     // 6. Save to Supabase 'appointments' table
@@ -88,7 +102,7 @@ serve(async (req) => {
         therapist_id: therapistId,
         start_time: startTime,
         end_time: endTime,
-        google_calendar_event_id: eventData.id,
+        google_calendar_event_id: googleCalendarEventId,
         status: 'confirmed'
       })
       .select()
@@ -109,7 +123,7 @@ serve(async (req) => {
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 
-  } catch (error) {
+  } catch (error: any) {
     console.error(error)
     return new Response(
       JSON.stringify({ error: error.message }),

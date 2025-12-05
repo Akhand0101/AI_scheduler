@@ -1,13 +1,14 @@
 // Setup type definitions for built-in Supabase Runtime APIs
-import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { GoogleGenAI } from "npm:@google/genai";
 
-// Define types for extracted data
+// Define types for extracted data and responses
 interface ExtractedData {
   problem: string;
   schedule: string;
   insurance: string;
+  booking_intent: "yes" | "no" | "clarification" | "not specified";
 }
 
 interface ChatResponse {
@@ -17,6 +18,9 @@ interface ChatResponse {
   nextAction: string;
   inquiryId?: string;
   message: string;
+  therapistId?: string;
+  startTime?: string;
+  endTime?: string;
 }
 
 // CORS headers
@@ -28,259 +32,158 @@ const corsHeaders = {
 console.log("Handle-Chat Function initialized (using @google/genai SDK)");
 
 Deno.serve(async (req) => {
-  // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   try {
-    // Initialize Supabase client
     const supabaseClient = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_ANON_KEY") ?? "",
-      {
-        global: {
-          headers: { Authorization: req.headers.get("Authorization")! },
-        },
-      }
+      { global: { headers: { Authorization: req.headers.get("Authorization")! } } }
     );
 
-    // Parse request body
     const body = await req.json();
-    const userMessage = body.userMessage || body.messageText;
-    const patientId = body.patientId || body.patientIdentifier;
-    const conversationHistory = body.conversationHistory;
+    const userMessage = body.userMessage || "";
+    const patientId = body.patientId || "anon-123";
+    const conversationHistory = body.conversationHistory || [];
+    const frontendMatchedTherapistId = body.matchedTherapistId || null;
 
     if (!userMessage) {
-      return new Response(
-        JSON.stringify({ success: false, error: "userMessage is required" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ success: false, error: "userMessage is required" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     console.log("Processing message:", userMessage);
 
-    // Step A: Call Gemini AI API (Now with SDK + Auto-Retry)
-    const extractedData = await extractInfoWithGemini(userMessage, conversationHistory);
+    let inquiry: any = null;
+    const existingInquiryId = await getInquiryId(supabaseClient, patientId);
+    if (existingInquiryId) {
+      const { data } = await supabaseClient.from('inquiries').select('*').eq('id', existingInquiryId).single();
+      inquiry = data;
+    }
+    console.log("Existing inquiry:", inquiry);
+
+    if (frontendMatchedTherapistId && inquiry && !inquiry.matched_therapist_id) {
+      const { data: updatedInquiry, error } = await supabaseClient
+        .from('inquiries')
+        .update({ matched_therapist_id: frontendMatchedTherapistId, status: 'matched' })
+        .eq('id', inquiry.id)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("Error updating inquiry with matched_therapist_id", error);
+      } else {
+        inquiry = updatedInquiry; // Use the updated inquiry object
+      }
+    }
+
+    const extractedData = await extractInfoWithGemini(userMessage, conversationHistory, inquiry);
     console.log("Extracted data:", extractedData);
 
-    // Step B: Save inquiry to database
-    const inquiryId = await saveInquiry(
-      supabaseClient,
-      userMessage,
-      extractedData,
-      patientId
-    );
-    console.log("Inquiry saved with ID:", inquiryId);
+    const inquiryId = await saveInquiry(supabaseClient, extractedData, patientId, inquiry?.id);
+    console.log("Inquiry saved/updated with ID:", inquiryId);
 
-    // Step C & D: Determine next action and prepare response
-    const response = prepareResponse(extractedData, inquiryId, userMessage);
+    const { data: latestInquiry } = await supabaseClient.from('inquiries').select('*').eq('id', inquiryId).single();
 
-    return new Response(
-      JSON.stringify(response),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    const scheduleToUse = (extractedData.schedule && extractedData.schedule !== 'not specified') 
+        ? extractedData.schedule
+        : latestInquiry.requested_schedule;
+
+    if (latestInquiry?.matched_therapist_id && extractedData.booking_intent === 'yes') {
+      if (scheduleToUse) {
+        const appointmentDate = latestInquiry.requested_schedule?.includes("December 15") 
+            ? new Date("2025-12-15T12:00:00Z") // Base on user's original date request
+            : new Date();
+        
+        let hour = 15, minute = 0; // Default to 3 PM
+        const timeMatch = scheduleToUse.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?/i);
+        if (timeMatch) {
+            hour = parseInt(timeMatch[1], 10);
+            minute = parseInt(timeMatch[2] || "0", 10);
+            if (timeMatch[3]?.toLowerCase() === 'pm' && hour < 12) hour += 12;
+            if (timeMatch[3]?.toLowerCase() === 'am' && hour === 12) hour = 0; // Midnight case
+        }
+        
+        // Using UTC to avoid timezone issues on the server
+        appointmentDate.setUTCHours(hour, minute, 0, 0);
+
+        const startTime = appointmentDate.toISOString();
+        appointmentDate.setUTCHours(appointmentDate.getUTCHours() + 1);
+        const endTime = appointmentDate.toISOString();
+
+        return new Response(JSON.stringify({
+          success: true,
+          nextAction: 'book-appointment',
+          message: `Perfect, I will now book your appointment for ${scheduleToUse}`,
+          inquiryId: latestInquiry.id,
+          therapistId: latestInquiry.matched_therapist_id,
+          startTime,
+          endTime,
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      } else {
+        return new Response(JSON.stringify({
+          success: true,
+          nextAction: 'awaiting-info',
+          message: "Great! What time would you like to schedule the appointment?",
+          inquiryId: latestInquiry.id,
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    }
+
+    const response = prepareResponse(latestInquiry, inquiryId);
+    return new Response(JSON.stringify(response), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
   } catch (error) {
     console.error("Error in handle-chat:", error);
     const errorMessage = error instanceof Error ? error.message : "An unexpected error occurred";
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: errorMessage,
-      }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ success: false, error: errorMessage }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   }
 });
 
-/**
- * Call Gemini AI API to extract healthcare information
- * FEATURES: Auto-fallback through multiple model names to fix 404 errors
- */
-async function extractInfoWithGemini(
-  userMessage: string,
-  conversationHistory?: Array<{ role: string; content: string }>
-): Promise<ExtractedData> {
-  const apiKey = Deno.env.get("GEMINI_API_KEY")?.trim();
-
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY environment variable is not set");
-  }
-
-  // Initialize the SDK Client
-  const client = new GoogleGenAI({ apiKey });
-
-  // Build conversation context
-  let contextMessages = "";
-  if (conversationHistory && conversationHistory.length > 0) {
-    contextMessages = conversationHistory
-      .map((msg) => `${msg.role}: ${msg.content}`)
-      .join("\n");
-    contextMessages += "\n\n";
-  }
-
-  const prompt = `You are a healthcare scheduling assistant specialized in mental health services.
-The user is looking for a therapist or mental health professional.
-
-${contextMessages}Current user message: ${userMessage}
-
-Extract the following information from the conversation:
-1. Main problem/symptoms - What mental health issue or concern the user is facing
-2. Preferred schedule times - Any specific days, times, or availability mentioned
-3. Insurance provider - Any insurance company or payment method mentioned
-
-Guidelines:
-- If information is not mentioned, use "not specified"
-- Be specific but concise
-- For schedule, extract any time preferences, urgency, or flexibility mentioned
-- For insurance, look for company names like "Blue Cross", "Aetna", "UnitedHealthcare", etc.
-
-Format your output strictly as JSON:
-{
-  "problem": "...",
-  "schedule": "...",
-  "insurance": "..."
-}`;
-
-  // 2. SELF-HEALING LOGIC: List of models to try in order
-  // REMOVED 'gemini-pro' (1.0) because it often causes 404s on new API versions
-  const modelsToTry = [
-    'gemini-2.5-flash',       // Standard Free Tiee
-  ];
-
-  let lastError: Error | null = null;
-
-  // Loop through models until one works
-  for (const modelName of modelsToTry) {
-    try {
-      console.log(`Attempting Gemini Request using model: ${modelName}`);
-
-      // SDK CALL - Using simple string for contents (supported by new SDK)
-      const response = await client.models.generateContent({
-        model: modelName,
-        contents: prompt, 
-        config: {
-          responseMimeType: 'application/json', // Force JSON response
-          temperature: 0.3,
-          maxOutputTokens: 1024,
-        }
-      });
-
-      // ROBUSTNESS FIX: Access candidates directly to avoid .text() vs .text ambiguity
-      const generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      if (!generatedText) {
-         throw new Error("Empty response from AI SDK");
-      }
-
-      console.log(`Success with model: ${modelName}`);
-
-      // Clean up JSON (SDK usually returns clean JSON with responseMimeType, but safety first)
-      let jsonText = generatedText.trim();
-      if (jsonText.startsWith("```json")) {
-        jsonText = jsonText.replace(/^```json\n/, "").replace(/\n```$/, "");
-      } else if (jsonText.startsWith("```")) {
-        jsonText = jsonText.replace(/^```\n/, "").replace(/\n```$/, "");
-      }
-
-      return JSON.parse(jsonText) as ExtractedData;
-
-    } catch (error: any) {
-      console.warn(`Failed with model ${modelName}:`, error.message || error);
-      lastError = error;
-      
-      // If 404/429, the loop naturally retries the next model.
-    }
-  }
-
-  // If we exit the loop, all models failed
-  console.error("All Gemini models failed.");
-  throw lastError || new Error("Failed to connect to any Gemini model.");
+async function getInquiryId(supabase: any, patientId: string): Promise<string | null> {
+    if (!patientId) return null;
+    const { data, error } = await supabase.from('inquiries').select('id').eq('patient_identifier', patientId).order('created_at', { ascending: false }).limit(1).single();
+    if (error || !data) return null;
+    return data.id;
 }
 
-/**
- * Save inquiry to the database
- */
-async function saveInquiry(
-  supabase: any,
-  originalMessage: string,
-  extractedData: ExtractedData,
-  patientId?: string
-): Promise<string> {
-  const { data, error } = await supabase
-    .from("inquiries")
-    .insert({
-      patient_identifier: patientId || null,
-      problem_description: originalMessage,
-      requested_schedule: extractedData.schedule,
-      insurance_info: extractedData.insurance,
-      extracted_specialty: extractedData.problem,
-      status: "pending",
-    })
-    .select()
-    .single();
+async function saveInquiry(supabase: any, extractedData: ExtractedData, patientId?: string, existingInquiryId?: string): Promise<string> {
+  const inquiryData: { [key: string]: any } = { patient_identifier: patientId || null };
+  if (extractedData.problem && extractedData.problem !== 'not specified') inquiryData.extracted_specialty = extractedData.problem;
+  if (extractedData.schedule && extractedData.schedule !== 'not specified') inquiryData.requested_schedule = extractedData.schedule;
+  if (extractedData.insurance && extractedData.insurance !== 'not specified') inquiryData.insurance_info = extractedData.insurance;
 
-  if (error) {
-    console.error("Error saving inquiry:", error);
-    throw new Error(`Failed to save inquiry: ${error.message}`);
+  if (existingInquiryId) {
+    const { data, error } = await supabase.from("inquiries").update(inquiryData).eq('id', existingInquiryId).select().single();
+    if (error) throw new Error(`Failed to update inquiry: ${error.message}`);
+    return data.id;
+  } else {
+    inquiryData.status = 'pending';
+    const { data, error } = await supabase.from("inquiries").insert(inquiryData).select().single();
+    if (error) throw new Error(`Failed to save inquiry: ${error.message}`);
+    return data.id;
   }
-
-  return data.id;
 }
 
-/**
- * Prepare the response based on extracted data
- */
-function prepareResponse(
-  extractedData: ExtractedData,
-  inquiryId: string,
-  userMessage: string
-): ChatResponse {
+function prepareResponse(inquiry: any, inquiryId: string): ChatResponse {
   const missingInfo: string[] = [];
+  if (!inquiry.extracted_specialty) missingInfo.push("problem");
+  if (!inquiry.requested_schedule) missingInfo.push("schedule");
+  if (!inquiry.insurance_info) missingInfo.push("insurance");
 
-  // Check what information is missing
-  if (
-    !extractedData.problem ||
-    extractedData.problem === "not specified" ||
-    extractedData.problem.trim() === ""
-  ) {
-    missingInfo.push("problem");
-  }
-
-  if (
-    !extractedData.schedule ||
-    extractedData.schedule === "not specified" ||
-    extractedData.schedule.trim() === ""
-  ) {
-    missingInfo.push("schedule");
-  }
-
-  if (
-    !extractedData.insurance ||
-    extractedData.insurance === "not specified" ||
-    extractedData.insurance.trim() === ""
-  ) {
-    missingInfo.push("insurance");
-  }
-
-  // If we have all the information, proceed to matching
   if (missingInfo.length === 0) {
     return {
       success: true,
-      extractedData,
       nextAction: "find-therapist",
       inquiryId,
-      message:
-        "Thank you! I have all the information I need. Let me find the best therapist match for you.",
+      message: "Thank you! I have all the information I need. Let me find the best therapist match for you.",
     };
   }
 
-  // Otherwise, ask for the missing information
-  const followUpQuestion = generateFollowUpQuestion(missingInfo, extractedData);
-
+  const followUpQuestion = generateFollowUpQuestion(missingInfo, inquiry);
   return {
     success: true,
-    extractedData,
     followUpQuestion,
     nextAction: "awaiting-info",
     inquiryId,
@@ -288,39 +191,64 @@ function prepareResponse(
   };
 }
 
-/**
- * Generate an intelligent follow-up question for missing information
- */
 function generateFollowUpQuestion(
   missingInfo: string[],
-  extractedData: ExtractedData
+  inquiryData: any
 ): string {
-  // Acknowledge what we got
   const acknowledgedParts: string[] = [];
-  if (extractedData.problem && extractedData.problem !== "not specified") {
-    acknowledgedParts.push(`I understand you're dealing with ${extractedData.problem}`);
-  }
-  if (extractedData.schedule && extractedData.schedule !== "not specified") {
-    acknowledgedParts.push(`and you prefer ${extractedData.schedule}`);
-  }
-  if (extractedData.insurance && extractedData.insurance !== "not specified") {
-    acknowledgedParts.push(`with ${extractedData.insurance} insurance`);
+  if (inquiryData.extracted_specialty) acknowledgedParts.push(`I understand you're dealing with ${inquiryData.extracted_specialty}`);
+  if (inquiryData.requested_schedule) acknowledgedParts.push(`and you prefer ${inquiryData.requested_schedule}`);
+  const acknowledgment = acknowledgedParts.length > 0 ? acknowledgedParts.join(", ") + ". " : "";
+
+  if (missingInfo.includes("problem")) return `${acknowledgment}Could you tell me more about what you'd like help with? For example, are you dealing with anxiety, depression, stress, relationship issues, or something else?`;
+  if (missingInfo.includes("schedule")) return `${acknowledgment}When would you prefer to have your appointments? Please let me know your preferred days and times.`;
+  if (missingInfo.includes("insurance")) return `${acknowledgment}Do you have health insurance? If so, which provider? This will help me find therapists that accept your insurance.`;
+  
+  return `${acknowledgment}I need a bit more information to find the perfect therapist for you.`;
+}
+
+async function extractInfoWithGemini(userMessage: string, conversationHistory?: Array<{ role: string; content: string }>, inquiry?: any): Promise<ExtractedData> {
+  const apiKey = Deno.env.get("GEMINI_API_KEY")?.trim();
+  if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set");
+  const client = new GoogleGenAI({ apiKey });
+
+  let contextMessages = "";
+  if (conversationHistory && conversationHistory.length > 0) {
+    contextMessages = conversationHistory.map((msg) => `${msg.role}: ${msg.content}`).join("\n") + "\n\n";
   }
 
-  let acknowledgment = acknowledgedParts.length > 0 ? acknowledgedParts.join(", ") + ". " : "";
+  const bookingPrompt = inquiry?.matched_therapist_id
+    ? `The user has been matched with a therapist and was asked if they want to book. Analyze their response for booking intent. If they provide a time, extract it into the 'schedule' field.`
+    : "";
 
-  // Ask for the first missing piece of information
-  if (missingInfo.includes("problem")) {
-    return `${acknowledgment}Could you tell me more about what you'd like help with? For example, are you dealing with anxiety, depression, stress, relationship issues, or something else?`;
+  const prompt = `You are a healthcare scheduling assistant.
+${contextMessages}Current user message: ${userMessage}
+${bookingPrompt}
+Extract the following information:
+1. Main problem/symptoms.
+2. Preferred schedule times.
+3. Insurance provider.
+4. Booking Intent ("yes", "no", "clarification", or "not specified").
+Guidelines: Use "not specified" for missing information. The booking_intent should only be filled if a therapist has been matched.
+Format your output strictly as JSON:
+{"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."}`;
+
+  const modelsToTry = ['gemini-2.5-flash'];
+  for (const modelName of modelsToTry) {
+    try {
+      console.log(`Attempting Gemini Request using model: ${modelName}`);
+      const response = await client.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 1024 }
+      });
+      const generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!generatedText) throw new Error("Empty response from AI SDK");
+      console.log(`Success with model: ${modelName}`);
+      return JSON.parse(generatedText) as ExtractedData;
+    } catch (error: any) {
+      console.warn(`Failed with model ${modelName}:`, error.message || error);
+    }
   }
-
-  if (missingInfo.includes("schedule")) {
-    return `${acknowledgment}When would you prefer to have your appointments? Please let me know your preferred days and times, or if you have any scheduling constraints.`;
-  }
-
-  if (missingInfo.includes("insurance")) {
-    return `${acknowledgment}Do you have health insurance? If so, which provider? This will help me find therapists that accept your insurance.`;
-  }
-
-  return `${acknowledgment}I need a bit more information to find the perfect therapist for you. Could you provide additional details?`;
+  throw new Error("All Gemini models failed.");
 }

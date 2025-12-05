@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { supabase } from "../supabaseClient";
 import {
   Box,
   TextField,
@@ -20,6 +21,7 @@ export default function ChatWindow() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [matchedTherapistId, setMatchedTherapistId] = useState<string | null>(null);
   const messagesEndRef = useRef<null | HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -30,55 +32,90 @@ export default function ChatWindow() {
     scrollToBottom();
   }, [messages]);
 
-  const sendToHandleChat = async (text: string) => {
-    const functionsBase = import.meta.env.VITE_FUNCTIONS_BASE;
-    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  // ... existing imports ...
 
-    if (!functionsBase) {
-      console.warn("VITE_FUNCTIONS_BASE not set, using mock response");
-      return new Promise(resolve => setTimeout(() => resolve({ message: "Mock response: Env vars missing" }), 1000));
-    }
+  // ... inside ChatWindow component ...
 
-    const res = await fetch(`${functionsBase}/handle-chat`, {
-      method: "POST",
-      headers: { 
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${anonKey}` 
-      },
-      body: JSON.stringify({ 
-      userMessage: text,       // Changed from messageText
-      patientId: "anon-123"    // Changed from patientIdentifier
-    })
+  const sendToHandleChat = async (text: string, currentMessages: Message[], therapistId: string | null) => {
+    // Convert sender to role and text to content
+    const conversationHistory = currentMessages.map(msg => ({
+      role: msg.sender,
+      content: msg.text
+    }));
+
+    const { data, error } = await supabase.functions.invoke('handle-chat', {
+      body: {
+        userMessage: text,
+        conversationHistory: conversationHistory, // Pass the history
+        patientId: "anon-123",
+        matchedTherapistId: therapistId
+      }
     });
-    
-    if (!res.ok) {
-        throw new Error(`Server error: ${res.status}`);
+
+    if (error) {
+      console.error("Function error:", error);
+      throw new Error(error.message || "Failed to process message");
     }
 
-    return res.json();
+    return data;
   };
 
   const handleSend = async () => {
     if (!input.trim()) return;
     const userMsg = input;
+    const newMessages: Message[] = [...messages, { sender: "user", text: userMsg }];
+
     setInput("");
-    setMessages(prev => [...prev, { sender: "user", text: userMsg }]);
+    setMessages(newMessages);
     setLoading(true);
 
     try {
-      const data: any = await sendToHandleChat(userMsg);
-      
-      // FIX: Use the natural language 'message' from the AI
-      const reply = data?.message || "I processed that, but didn't get a specific response.";
+      // 1. Get AI response and check for next actions
+      const chatData: any = await sendToHandleChat(userMsg, newMessages, matchedTherapistId);
+      const reply = chatData?.message || "I processed that. What's next?";
+      setMessages(prev => [...prev, { sender: "bot", text: reply }]);
 
-      // Debugging: Log the extracted data to console to verify it's working
-      if (data?.extractedData) {
-          console.log("AI Extracted:", data.extractedData);
+      // 2. If the next action is to find a therapist, execute it
+      if (chatData?.nextAction === 'find-therapist' && chatData?.inquiryId) {
+        const { data: therapistData, error: therapistError } = await supabase.functions.invoke('find-therapist', {
+          body: { inquiryId: chatData.inquiryId }
+        });
+
+        if (therapistError) throw new Error(therapistError.message);
+        
+        const chosen = therapistData?.chosen;
+        let therapistReply = "I'm sorry, I couldn't find a suitable therapist at the moment. Please try again later.";
+        
+        if (chosen) {
+          setMatchedTherapistId(chosen.id);
+          therapistReply = `I've found a great match for you: ${chosen.name}.`;
+          const therapist = therapistData.matches[0]?.therapist;
+          if (therapist?.bio) {
+            therapistReply += `\n\nHere's a bit about them: "${therapist.bio}"`;
+          }
+          therapistReply += `\n\nWould you like to book an appointment with ${chosen.name}?`;
+        }
+        
+        setMessages(prev => [...prev, { sender: "bot", text: therapistReply }]);
+
+      } else if (chatData?.nextAction === 'book-appointment') {
+        // 3. If the next action is to book, execute it
+        const { data: bookingData, error: bookingError } = await supabase.functions.invoke('book-appointment', {
+          body: { ...chatData } // Pass all data from handle-chat
+        });
+
+        if (bookingError) throw new Error(bookingError.message);
+
+        const confirmationMessage = bookingData?.success
+          ? "Your appointment has been successfully booked! You should receive a calendar invitation shortly."
+          : "There was an issue booking your appointment. Please try again.";
+          
+        setMessages(prev => [...prev, { sender: "bot", text: confirmationMessage }]);
+        setMatchedTherapistId(null);
       }
 
-      setMessages(prev => [...prev, { sender: "bot", text: reply }]);
     } catch (err: any) {
-      setMessages(prev => [...prev, { sender: "bot", text: "I apologize, but I'm having trouble connecting right now. Please try again later." }]);
+      setMessages(prev => [...prev, { sender: "bot", text: `I apologize, an error occurred: ${err.message}` }]);
       console.error(err);
     } finally {
       setLoading(false);

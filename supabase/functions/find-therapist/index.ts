@@ -1,17 +1,20 @@
-// deno-lint-ignore-file no-explicit-any
-// supabase/functions/find-therapist/index.ts
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+// Setup type definitions for built-in Supabase Runtime APIs
+import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+import { createClient } from "jsr:@supabase/supabase-js@2"
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const FUNCTION_BASE_URL = Deno.env.get("FUNCTION_BASE_URL") ?? "";
 // Optional calendar check toggles and Google creds
 const CHECK_CALENDAR_AVAILABILITY = (Deno.env.get("CHECK_CALENDAR_AVAILABILITY") ?? "false").toLowerCase() === "true";
 const GOOGLE_CLIENT_ID = Deno.env.get("GOOGLE_CLIENT_ID") ?? "";
 const GOOGLE_CLIENT_SECRET = Deno.env.get("GOOGLE_CLIENT_SECRET") ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
 
 type RequestBody = {
   inquiryId?: string;
@@ -103,10 +106,15 @@ function scoreTherapist(t: Therapist, desiredSpecialty?: string | null, insuranc
   return score;
 }
 
-serve(async (req: { method: string; json: () => Promise<any>; }) => {
+Deno.serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
+
   try {
     if (req.method !== "POST") {
-      return new Response(JSON.stringify({ ok: false, error: "Only POST allowed" }), { status: 405, headers: { "content-type": "application/json" }});
+      return new Response(JSON.stringify({ ok: false, error: "Only POST allowed" }), { status: 405, headers: { ...corsHeaders, "content-type": "application/json" } });
     }
 
     const body: RequestBody = await req.json().catch(() => ({}));
@@ -121,7 +129,7 @@ serve(async (req: { method: string; json: () => Promise<any>; }) => {
     if (inquiryId) {
       const { data: inquiry, error: inqErr } = await supabase.from("inquiries").select("id, extracted_specialty, requested_schedule, insurance_info, problem_description").eq("id", inquiryId).single();
       if (inqErr) {
-        return new Response(JSON.stringify({ ok: false, error: "Inquiry not found", detail: inqErr.message }), { status: 404, headers: { "content-type": "application/json" }});
+        return new Response(JSON.stringify({ ok: false, error: "Inquiry not found", detail: inqErr.message }), { status: 404, headers: { ...corsHeaders, "content-type": "application/json" } });
       }
       desiredSpecialty = desiredSpecialty ?? (inquiry?.extracted_specialty ?? inquiry?.problem_description ?? null);
       requestedSchedule = requestedSchedule ?? inquiry?.requested_schedule ?? null;
@@ -141,7 +149,7 @@ serve(async (req: { method: string; json: () => Promise<any>; }) => {
 
     if (!therapists || therapists.length === 0) {
       if (inquiryId) await supabase.from("inquiries").update({ status: "no-match" }).eq("id", inquiryId);
-      return new Response(JSON.stringify({ ok: true, matches: [], chosen: null, message: "No therapists available" }), { headers: { "content-type": "application/json" }});
+      return new Response(JSON.stringify({ ok: true, matches: [], chosen: null, message: "No therapists available" }), { headers: { ...corsHeaders, "content-type": "application/json" } });
     }
 
     // Optional availability window parsing (best-effort)
@@ -237,10 +245,10 @@ serve(async (req: { method: string; json: () => Promise<any>; }) => {
         score: top.score,
         availability: top.availability ?? null
       } : null
-    }), { headers: { "content-type": "application/json" }});
-  // deno-lint-ignore no-explicit-any
+    }), { headers: { ...corsHeaders, "content-type": "application/json" } });
+    // deno-lint-ignore no-explicit-any
   } catch (err: any) {
     console.error("Unhandled error in find-therapist:", err);
-    return new Response(JSON.stringify({ ok: false, error: err?.message ?? String(err) }), { status: 500, headers: { "content-type": "application/json" }});
+    return new Response(JSON.stringify({ ok: false, error: err?.message ?? String(err) }), { status: 500, headers: { ...corsHeaders, "content-type": "application/json" } });
   }
 });

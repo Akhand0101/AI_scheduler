@@ -40,30 +40,17 @@ export default function AppointmentList() {
   const fetchAppointments = async () => {
     setLoading(true);
     try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData.session?.access_token;
-      if (!token) {
-        setAppointments([]);
-        setLoading(false);
-        return;
-      }
-
-      const res = await fetch(`${import.meta.env.VITE_FUNCTIONS_BASE}/get-admin-data`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
+      const { data, error } = await supabase.functions.invoke('get-admin-data', {
+        method: "GET"
       });
 
-      if (!res.ok) {
+      if (error) {
+        console.error("Error fetching appointments:", error);
         setAppointments([]);
-        setLoading(false);
         return;
       }
 
-      const json = await res.json();
-      setAppointments(json.appointments ?? []);
+      setAppointments(data.appointments ?? []);
     } catch (err) {
       console.error("Error fetching appointments:", err);
       setAppointments([]);
