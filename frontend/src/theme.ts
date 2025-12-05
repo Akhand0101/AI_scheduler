@@ -3,13 +3,13 @@ import { createTheme } from "@mui/material/styles";
 const theme = createTheme({
   palette: {
     primary: {
-      main: "#0F766E", // Teal 700
+      main: "#12452F", // Teal 700
       light: "#2DD4BF", // Teal 400
       dark: "#0F5132",
       contrastText: "#ffffff",
     },
     secondary: {
-      main: "#64748B", // Slate 500
+      main: "#12452F", // Slate 500
       light: "#94A3B8",
       dark: "#334155",
       contrastText: "#ffffff",
