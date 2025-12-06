@@ -62,7 +62,7 @@ export default function DebugPage() {
     };
 
     const testAuthRedirect = async () => {
-        const { supabase } = await import("../supabaseClient");
+
         const redirectUrl = window.location.origin + '/admin';
         alert(`Please ensure '${redirectUrl}' is added to your Supabase Auth -> URL Configuration -> Redirect URLs.`);
     };
