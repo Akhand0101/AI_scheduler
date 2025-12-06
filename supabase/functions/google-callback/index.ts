@@ -54,7 +54,9 @@ serve(async (req) => {
     if (dbError) throw dbError
 
     // 3. Redirect back to your React Admin App
-    return Response.redirect('http://localhost:5173/admin?success=true', 302)
+    // 3. Redirect back to your React Admin App
+    const siteUrl = Deno.env.get('SITE_URL') || 'http://localhost:5173';
+    return Response.redirect(`${siteUrl}/admin?success=true`, 302)
 
   } catch (err) {
     let errorMessage = 'An unknown error occurred';
