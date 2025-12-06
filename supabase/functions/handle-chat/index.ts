@@ -350,22 +350,27 @@ ${missingInfo.length === 0 ? "Since we have all the information, let them know y
 
 Generate ONLY the assistant's response message (no labels, no JSON, just the natural conversational text):`;
 
-  try {
-    const response = await client.models.generateContent({
-      model: 'gemini-1.5-flash',
-      contents: prompt,
-      config: { temperature: 0.8, maxOutputTokens: 200 }
-    });
-    const generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-    return generatedText || "I'm here to help you find the right therapist. Could you tell me what brings you here today?";
-  } catch (error: any) {
-    console.warn("Failed to generate conversational response:", error.message || error);
-    // Fallback to basic response
-    if (missingInfo.length > 0) {
-      return `I'd love to help you find the right therapist. Could you tell me a bit more about ${missingInfo[0]}?`;
+  const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+  for (const modelName of modelsToTry) {
+    try {
+      console.log(`Generating conversational response with: ${modelName}`);
+      const response = await client.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: { temperature: 0.8, maxOutputTokens: 200 }
+      });
+      const generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      return generatedText || "I'm here to help you find the right therapist. Could you tell me what brings you here today?";
+    } catch (error: any) {
+      console.warn(`Failed conversation with ${modelName}:`, error.message || error);
     }
-    return "Thanks for sharing that with me. Let me find some great therapist options for you.";
   }
+
+  // Fallback if all fail
+  if (missingInfo.length > 0) {
+     return `I'd love to help you find the right therapist. Could you tell me a bit more about ${missingInfo[0]}?`;
+  }
+  return "Thanks for sharing that with me. Let me find some great therapist options for you.";
 }
 
 async function extractInfoWithGemini(
@@ -434,7 +439,7 @@ Guidelines:
 Format your output strictly as JSON:
 {"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."${therapistSelectionPrompt ? ', "therapist_selection": null or 1-3' : ''}}`;
 
-  const modelsToTry = ['gemini-1.5-flash'];
+  const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
   for (const modelName of modelsToTry) {
     try {
       console.log(`Attempting Gemini Request using model: ${modelName}`);
