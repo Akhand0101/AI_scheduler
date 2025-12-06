@@ -102,8 +102,22 @@ export default function AdminPage() {
   }, [session]);
 
   const handleDisconnectCalendar = async () => {
-    // TODO: Implement disconnect logic
-    console.log("Disconnecting calendar...");
+    if (!session?.user?.id) return;
+
+    // Attempt to clear the token from the database
+    const { error } = await supabase
+      .from('therapists')
+      .update({ google_refresh_token: null })
+      .eq('user_id', session.user.id); // Securely match the logged-in user
+
+    if (error) {
+      console.error("Disconnect error:", error);
+      alert("Failed to disconnect: " + error.message);
+    } else {
+      // Refresh local state to show "Connect" button again
+      setTherapist({ ...therapist, google_refresh_token: null });
+      alert("Calendar disconnected. You can now connect again to fix sync issues.");
+    }
   };
 
   if (!session) {
