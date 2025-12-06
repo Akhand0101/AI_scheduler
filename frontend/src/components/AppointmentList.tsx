@@ -138,11 +138,13 @@ export default function AppointmentList() {
                     <Tooltip title="View Calendar Event">
                       <IconButton
                         onClick={() => {
-                          if (a.google_calendar_event_id && a.google_calendar_event_id !== "") {
+                          if (a.google_calendar_event_id) {
                             const url = `https://calendar.google.com/calendar/u/0/r/eventedit/${a.google_calendar_event_id}`;
                             window.open(url, "_blank");
                           } else {
-                            alert("No calendar event id available to open.");
+                            // Fallback to main calendar if sync failed or ID missing
+                            alert("This appointment doesn't have a linked Google Calendar event ID. Opening your main calendar.");
+                            window.open("https://calendar.google.com", "_blank");
                           }
                         }}
                         size="small"
