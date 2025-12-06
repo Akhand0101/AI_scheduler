@@ -17,7 +17,7 @@ type Message = { sender: "user" | "bot"; text: string };
 
 export default function ChatWindow() {
   const [messages, setMessages] = useState<Message[]>([
-    { sender: "bot", text: "Hi! 👋 I'm Kai, your therapy booking assistant. I'm here to help you schedule an appointment with the right therapist.\n\nTo get you matched and booked quickly, I'll need 3 things:\n✓ What brings you here (anxiety, depression, relationship issues, etc.)\n✓ When you're available\n✓ Your insurance provider\n\nLet's start - what brings you here today?" }
+    { sender: "bot", text: "Hi! 👋 I'm Kai, your therapy booking assistant. I'm here to help you find and schedule an appointment with the right therapist. What brings you here today?" }
   ]);
   // Use a random ID per session for demo purposes, ensuring a fresh conversation on refresh
   const [patientId] = useState(`anon-${Math.random().toString(36).substring(7)}`);
