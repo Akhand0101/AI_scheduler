@@ -138,8 +138,12 @@ export default function AppointmentList() {
                     <Tooltip title="View Calendar Event">
                       <IconButton
                         onClick={() => {
-                          if (a.google_calendar_event_id) {
-                            const url = `https://calendar.google.com/calendar/u/0/r/eventedit/${a.google_calendar_event_id}`;
+                          if (a.google_calendar_event_id && a.start_time) {
+                            // Extract date for Google Calendar URL
+                            const eventDate = new Date(a.start_time);
+                            const dateStr = eventDate.toISOString().split('T')[0].replace(/-/g, '');
+                            // Open Google Calendar at this date
+                            const url = `https://calendar.google.com/calendar/u/0/r/day/${dateStr}`;
                             window.open(url, "_blank");
                           } else {
                             // Fallback to main calendar if sync failed or ID missing

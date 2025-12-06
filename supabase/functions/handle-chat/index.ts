@@ -92,25 +92,107 @@ Deno.serve(async (req) => {
 
     if (latestInquiry?.matched_therapist_id && extractedData.booking_intent === 'yes') {
       if (scheduleToUse) {
-        const appointmentDate = latestInquiry.requested_schedule?.includes("December 15") 
-            ? new Date("2025-12-15T12:00:00Z") // Base on user's original date request
-            : new Date();
+        const schedLower = scheduleToUse.toLowerCase();
+        console.log("=== PARSING SCHEDULE ===");
+        console.log("Input:", scheduleToUse);
         
-        let hour = 15, minute = 0; // Default to 3 PM
-        const timeMatch = scheduleToUse.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?/i);
+        let appointmentDate = new Date();
+        let hour = 9, minute = 0; // Default to 9 AM
+        let timeFound = false;
+        
+        // STEP 1: Extract TIME - be very specific about patterns
+        // Pattern 1: Look for "X am" or "X pm" (with or without space)
+        let timeMatch = schedLower.match(/(\d{1,2})(?::(\d{2}))?\s*(?:am|pm)/);
         if (timeMatch) {
-            hour = parseInt(timeMatch[1], 10);
-            minute = parseInt(timeMatch[2] || "0", 10);
-            if (timeMatch[3]?.toLowerCase() === 'pm' && hour < 12) hour += 12;
-            if (timeMatch[3]?.toLowerCase() === 'am' && hour === 12) hour = 0; // Midnight case
+          hour = parseInt(timeMatch[1], 10);
+          minute = parseInt(timeMatch[2] || "0", 10);
+          const meridiem = schedLower.includes('pm') ? 'pm' : 'am';
+          if (meridiem === 'pm' && hour < 12) hour += 12;
+          if (meridiem === 'am' && hour === 12) hour = 0;
+          timeFound = true;
+          console.log(`✓ Found time with am/pm: ${hour}:${minute}`);
         }
         
-        // Using UTC to avoid timezone issues on the server
-        appointmentDate.setUTCHours(hour, minute, 0, 0);
-
-        const startTime = appointmentDate.toISOString();
-        appointmentDate.setUTCHours(appointmentDate.getUTCHours() + 1);
-        const endTime = appointmentDate.toISOString();
+        // Pattern 2: Look for "at X" or "at X:XX"
+        if (!timeFound) {
+          timeMatch = schedLower.match(/\bat\s+(\d{1,2})(?::(\d{2}))?/);
+          if (timeMatch) {
+            hour = parseInt(timeMatch[1], 10);
+            minute = parseInt(timeMatch[2] || "0", 10);
+            // If hour is 1-7, assume PM (afternoon appointments)
+            if (hour >= 1 && hour <= 7) hour += 12;
+            timeFound = true;
+            console.log(`✓ Found time after 'at': ${hour}:${minute}`);
+          }
+        }
+        
+        // Validate time is reasonable
+        if (hour < 6 || hour > 22) {
+          console.log(`⚠ Unusual hour ${hour}, resetting to 9 AM`);
+          hour = 9;
+          minute = 0;
+        }
+        
+        // STEP 2: Extract MONTH
+        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
+                           'july', 'august', 'september', 'october', 'november', 'december'];
+        let monthIndex = -1;
+        
+        for (let i = 0; i < monthNames.length; i++) {
+          if (schedLower.includes(monthNames[i]) || schedLower.includes(monthNames[i].substring(0, 3))) {
+            monthIndex = i;
+            console.log(`✓ Found month: ${monthNames[i]} (index ${i})`);
+            break;
+          }
+        }
+        
+        // STEP 3: Extract DAY - only look for numbers NOT used in time
+        let dayOfMonth = appointmentDate.getDate(); // Default to today
+        
+        // Find all numbers in the string
+        const numberPattern = /(\d{1,2})/g;
+        const allNumbers = [...schedLower.matchAll(numberPattern)];
+        console.log(`All numbers found: ${allNumbers.map(m => m[1]).join(', ')}`);
+        
+        // Filter out the time-related numbers
+        const candidateDays = allNumbers
+          .map(m => parseInt(m[1], 10))
+          .filter(num => {
+            // Exclude if it's the hour or minute we already found
+            if (timeFound && (num === hour || num === (hour > 12 ? hour - 12 : hour) || num === minute)) {
+              console.log(`  Skipping ${num} - it's part of the time`);
+              return false;
+            }
+            // Only accept valid day numbers
+            if (num < 1 || num > 31) {
+              console.log(`  Skipping ${num} - out of valid day range`);
+              return false;
+            }
+            return true;
+          });
+        
+        if (candidateDays.length > 0) {
+          dayOfMonth = candidateDays[0]; // Use the first valid day candidate
+          console.log(`✓ Using day: ${dayOfMonth}`);
+        }
+        
+        // STEP 4: Construct the final date
+        if (monthIndex !== -1) {
+          appointmentDate = new Date(2025, monthIndex, dayOfMonth);
+        } else {
+          appointmentDate.setDate(dayOfMonth);
+        }
+        
+        appointmentDate.setHours(hour, minute, 0, 0);
+        console.log(`✓ Final datetime: ${appointmentDate.toLocaleString()}`);
+        console.log("======================");
+        
+        // Format for Google Calendar
+        const pad = (n: number) => n.toString().padStart(2, '0');
+        const startTimeStr = `${appointmentDate.getFullYear()}-${pad(appointmentDate.getMonth() + 1)}-${pad(appointmentDate.getDate())}T${pad(appointmentDate.getHours())}:${pad(appointmentDate.getMinutes())}:00`;
+        
+        appointmentDate.setHours(appointmentDate.getHours() + 1);
+        const endTimeStr = `${appointmentDate.getFullYear()}-${pad(appointmentDate.getMonth() + 1)}-${pad(appointmentDate.getDate())}T${pad(appointmentDate.getHours())}:${pad(appointmentDate.getMinutes())}:00`;
 
         return new Response(JSON.stringify({
           success: true,
@@ -118,8 +200,9 @@ Deno.serve(async (req) => {
           message: `Perfect, I will now book your appointment for ${scheduleToUse}`,
           inquiryId: latestInquiry.id,
           therapistId: latestInquiry.matched_therapist_id,
-          startTime,
-          endTime,
+          startTime: startTimeStr,
+          endTime: endTimeStr,
+          timeZone: 'Asia/Kolkata'
         }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       } else {
         return new Response(JSON.stringify({

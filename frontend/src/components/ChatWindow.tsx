@@ -107,7 +107,8 @@ export default function ChatWindow() {
             therapistId: data.therapistId,
             startTime: data.startTime,
             endTime: data.endTime,
-            patientName: "Guest Patient"
+            patientName: "Guest Patient",
+            timeZone: data.timeZone || 'Asia/Kolkata'
           }
         });
 

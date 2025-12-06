@@ -16,11 +16,12 @@ Deno.serve(async (req) => {
   try {
     // 1. Initialize Supabase
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
-    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
-    const supabase = createClient(supabaseUrl, supabaseAnonKey)
+    // USE SERVICE ROLE KEY so we can read sensitive tokens regardless of RLS
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    const supabase = createClient(supabaseUrl, supabaseServiceKey)
 
     // 2. Parse Request
-    const { inquiryId, therapistId, startTime, endTime, patientName } = await req.json()
+    const { inquiryId, therapistId, startTime, endTime, patientName, timeZone } = await req.json()
 
     if (!therapistId || !startTime || !endTime) {
       throw new Error("Missing required appointment details.")
@@ -70,12 +71,29 @@ Deno.serve(async (req) => {
         const eventBody = {
           summary: `Therapy Session with ${patientName || 'Patient'}`,
           description: `Inquiry ID: ${inquiryId}`,
-          start: { dateTime: startTime },
-          end: { dateTime: endTime },
+          start: { 
+            dateTime: startTime,
+            timeZone: timeZone || 'Asia/Kolkata' // Use provided timezone or default to IST
+          },
+          end: { 
+            dateTime: endTime,
+            timeZone: timeZone || 'Asia/Kolkata'
+          },
+          // Add attendees for email notifications (optional, requires patient email)
+          attendees: [
+            // { email: 'patient@example.com' } // Add patient email here if available
+          ],
+          reminders: {
+            useDefault: false,
+            overrides: [
+              { method: 'email', minutes: 24 * 60 }, // 1 day before
+              { method: 'popup', minutes: 30 },
+            ],
+          },
         }
 
         const calendarResponse = await fetch(
-          `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+          `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?sendUpdates=all`,
           {
             method: 'POST',
             headers: {
@@ -85,6 +103,12 @@ Deno.serve(async (req) => {
             body: JSON.stringify(eventBody),
           }
         )
+
+        // Check HTTP status BEFORE parsing JSON
+        if (!calendarResponse.ok) {
+            const errorText = await calendarResponse.text();
+            throw new Error(`Google Calendar API error (${calendarResponse.status}): ${errorText}`)
+        }
 
         const eventData = await calendarResponse.json()
         if (!eventData.id) {
