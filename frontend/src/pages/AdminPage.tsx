@@ -64,7 +64,7 @@ export default function AdminPage() {
 
         try {
           const redirectUri = window.location.origin + '/admin';
-          const { data, error } = await supabase.functions.invoke('oauth-callback', {
+          const { error } = await supabase.functions.invoke('oauth-callback', {
             body: { code, redirect_uri: redirectUri }
           });
 
