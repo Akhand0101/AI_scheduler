@@ -60,7 +60,7 @@ serve(async (req) => {
 
     // 3. Redirect back to your React Admin App
     // 3. Redirect back to your React Admin App
-    const siteUrl = Deno.env.get('SITE_URL') || 'http://localhost:5173';
+    const siteUrl = Deno.env.get('SITE_URL') || 'https://ai-scheduler-oqbk.vercel.app';
     return Response.redirect(`${siteUrl}/admin?success=true`, 302)
 
   } catch (err) {
