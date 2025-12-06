@@ -22,6 +22,7 @@ export default function ChatWindow() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [matchedTherapistId, setMatchedTherapistId] = useState<string | null>(null);
+  const [patientId] = useState(() => Math.random().toString(36).substring(2, 15));
   const messagesEndRef = useRef<null | HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -47,7 +48,7 @@ export default function ChatWindow() {
       body: {
         userMessage: text,
         conversationHistory: conversationHistory, // Pass the history
-        patientId: "anon-123",
+        patientId: patientId,
         matchedTherapistId: therapistId
       }
     });
@@ -82,10 +83,10 @@ export default function ChatWindow() {
         });
 
         if (therapistError) throw new Error(therapistError.message);
-        
+
         const chosen = therapistData?.chosen;
         let therapistReply = "I'm sorry, I couldn't find a suitable therapist at the moment. Please try again later.";
-        
+
         if (chosen) {
           setMatchedTherapistId(chosen.id);
           therapistReply = `I've found a great match for you: ${chosen.name}.`;
@@ -95,7 +96,7 @@ export default function ChatWindow() {
           }
           therapistReply += `\n\nWould you like to book an appointment with ${chosen.name}?`;
         }
-        
+
         setMessages(prev => [...prev, { sender: "bot", text: therapistReply }]);
 
       } else if (chatData?.nextAction === 'book-appointment') {
@@ -109,7 +110,7 @@ export default function ChatWindow() {
         const confirmationMessage = bookingData?.success
           ? "Your appointment has been successfully booked! You should receive a calendar invitation shortly."
           : "There was an issue booking your appointment. Please try again.";
-          
+
         setMessages(prev => [...prev, { sender: "bot", text: confirmationMessage }]);
         setMatchedTherapistId(null);
       }

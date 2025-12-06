@@ -233,7 +233,7 @@ Guidelines: Use "not specified" for missing information. The booking_intent shou
 Format your output strictly as JSON:
 {"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."}`;
 
-  const modelsToTry = ['gemini-2.5-flash'];
+  const modelsToTry = ['gemini-1.5-flash'];
   for (const modelName of modelsToTry) {
     try {
       console.log(`Attempting Gemini Request using model: ${modelName}`);

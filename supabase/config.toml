@@ -435,3 +435,25 @@ entrypoint = "./functions/oauth-callback/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/oauth-callback/*.html" ]
+
+[functions.connect-google]
+enabled = true
+verify_jwt = true
+import_map = "./functions/connect-google/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/connect-google/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/connect-google/*.html" ]
+
+[functions.google-callbac]
+enabled = true
+verify_jwt = true
+import_map = "./functions/google-callbac/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/google-callbac/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/google-callbac/*.html" ]
