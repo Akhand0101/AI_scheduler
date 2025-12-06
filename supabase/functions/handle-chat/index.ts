@@ -9,6 +9,7 @@ interface ExtractedData {
   schedule: string;
   insurance: string;
   booking_intent: "yes" | "no" | "clarification" | "not specified";
+  therapist_selection?: number; // 1, 2, or 3 for selecting from options
 }
 
 interface ChatResponse {
@@ -21,6 +22,7 @@ interface ChatResponse {
   therapistId?: string;
   startTime?: string;
   endTime?: string;
+  aiResponse?: string; // Natural conversational response from AI
 }
 
 // CORS headers
@@ -48,6 +50,7 @@ Deno.serve(async (req) => {
     const patientId = body.patientId || "anon-123";
     const conversationHistory = body.conversationHistory || [];
     const frontendMatchedTherapistId = body.matchedTherapistId || null;
+    const pendingTherapistMatches = body.pendingTherapistMatches || null; // Array of therapist options
 
     if (!userMessage) {
       return new Response(JSON.stringify({ success: false, error: "userMessage is required" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -74,12 +77,17 @@ Deno.serve(async (req) => {
       if (error) {
         console.error("Error updating inquiry with matched_therapist_id", error);
       } else {
-        inquiry = updatedInquiry; // Use the updated inquiry object
+        inquiry = updatedInquiry;
       }
     }
 
-    const extractedData = await extractInfoWithGemini(userMessage, conversationHistory, inquiry);
+    // Extract information from user message with enhanced conversational AI
+    const extractedData = await extractInfoWithGemini(userMessage, conversationHistory, inquiry, pendingTherapistMatches);
     console.log("Extracted data:", extractedData);
+
+    // Generate natural conversational response
+    const aiResponse = await generateConversationalResponse(userMessage, conversationHistory, inquiry, extractedData);
+    console.log("AI Response:", aiResponse);
 
     const inquiryId = await saveInquiry(supabaseClient, extractedData, patientId, inquiry?.id);
     console.log("Inquiry saved/updated with ID:", inquiryId);
@@ -90,6 +98,30 @@ Deno.serve(async (req) => {
         ? extractedData.schedule
         : latestInquiry.requested_schedule;
 
+    // Handle therapist selection if user chose from options
+    if (extractedData.therapist_selection && pendingTherapistMatches && Array.isArray(pendingTherapistMatches)) {
+      const selectedIndex = extractedData.therapist_selection - 1;
+      if (selectedIndex >= 0 && selectedIndex < pendingTherapistMatches.length) {
+        const selectedTherapist = pendingTherapistMatches[selectedIndex];
+        
+        // Update inquiry with selected therapist
+        await supabaseClient
+          .from('inquiries')
+          .update({ matched_therapist_id: selectedTherapist.id, status: 'matched' })
+          .eq('id', inquiryId);
+
+        return new Response(JSON.stringify({
+          success: true,
+          nextAction: 'therapist-selected',
+          inquiryId,
+          therapistId: selectedTherapist.id,
+          message: aiResponse,
+          aiResponse: aiResponse
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    }
+
+    // Handle booking if user confirmed and has matched therapist
     if (latestInquiry?.matched_therapist_id && extractedData.booking_intent === 'yes') {
       if (scheduleToUse) {
         const schedLower = scheduleToUse.toLowerCase();
@@ -97,11 +129,10 @@ Deno.serve(async (req) => {
         console.log("Input:", scheduleToUse);
         
         let appointmentDate = new Date();
-        let hour = 9, minute = 0; // Default to 9 AM
+        let hour = 9, minute = 0;
         let timeFound = false;
         
-        // STEP 1: Extract TIME - be very specific about patterns
-        // Pattern 1: Look for "X am" or "X pm" (with or without space)
+        // STEP 1: Extract TIME
         let timeMatch = schedLower.match(/(\d{1,2})(?::(\d{2}))?\s*(?:am|pm)/);
         if (timeMatch) {
           hour = parseInt(timeMatch[1], 10);
@@ -113,20 +144,17 @@ Deno.serve(async (req) => {
           console.log(`✓ Found time with am/pm: ${hour}:${minute}`);
         }
         
-        // Pattern 2: Look for "at X" or "at X:XX"
         if (!timeFound) {
           timeMatch = schedLower.match(/\bat\s+(\d{1,2})(?::(\d{2}))?/);
           if (timeMatch) {
             hour = parseInt(timeMatch[1], 10);
             minute = parseInt(timeMatch[2] || "0", 10);
-            // If hour is 1-7, assume PM (afternoon appointments)
             if (hour >= 1 && hour <= 7) hour += 12;
             timeFound = true;
             console.log(`✓ Found time after 'at': ${hour}:${minute}`);
           }
         }
         
-        // Validate time is reasonable
         if (hour < 6 || hour > 22) {
           console.log(`⚠ Unusual hour ${hour}, resetting to 9 AM`);
           hour = 9;
@@ -146,24 +174,20 @@ Deno.serve(async (req) => {
           }
         }
         
-        // STEP 3: Extract DAY - only look for numbers NOT used in time
-        let dayOfMonth = appointmentDate.getDate(); // Default to today
+        // STEP 3: Extract DAY
+        let dayOfMonth = appointmentDate.getDate();
         
-        // Find all numbers in the string
         const numberPattern = /(\d{1,2})/g;
         const allNumbers = [...schedLower.matchAll(numberPattern)];
         console.log(`All numbers found: ${allNumbers.map(m => m[1]).join(', ')}`);
         
-        // Filter out the time-related numbers
         const candidateDays = allNumbers
           .map(m => parseInt(m[1], 10))
           .filter(num => {
-            // Exclude if it's the hour or minute we already found
             if (timeFound && (num === hour || num === (hour > 12 ? hour - 12 : hour) || num === minute)) {
               console.log(`  Skipping ${num} - it's part of the time`);
               return false;
             }
-            // Only accept valid day numbers
             if (num < 1 || num > 31) {
               console.log(`  Skipping ${num} - out of valid day range`);
               return false;
@@ -172,7 +196,7 @@ Deno.serve(async (req) => {
           });
         
         if (candidateDays.length > 0) {
-          dayOfMonth = candidateDays[0]; // Use the first valid day candidate
+          dayOfMonth = candidateDays[0];
           console.log(`✓ Using day: ${dayOfMonth}`);
         }
         
@@ -187,7 +211,6 @@ Deno.serve(async (req) => {
         console.log(`✓ Final datetime: ${appointmentDate.toLocaleString()}`);
         console.log("======================");
         
-        // Format for Google Calendar
         const pad = (n: number) => n.toString().padStart(2, '0');
         const startTimeStr = `${appointmentDate.getFullYear()}-${pad(appointmentDate.getMonth() + 1)}-${pad(appointmentDate.getDate())}T${pad(appointmentDate.getHours())}:${pad(appointmentDate.getMinutes())}:00`;
         
@@ -197,24 +220,26 @@ Deno.serve(async (req) => {
         return new Response(JSON.stringify({
           success: true,
           nextAction: 'book-appointment',
-          message: `Perfect, I will now book your appointment for ${scheduleToUse}`,
+          message: aiResponse,
           inquiryId: latestInquiry.id,
           therapistId: latestInquiry.matched_therapist_id,
           startTime: startTimeStr,
           endTime: endTimeStr,
-          timeZone: 'Asia/Kolkata'
+          timeZone: 'Asia/Kolkata',
+          aiResponse: aiResponse
         }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       } else {
         return new Response(JSON.stringify({
           success: true,
           nextAction: 'awaiting-info',
-          message: "Great! What time would you like to schedule the appointment?",
+          message: aiResponse,
           inquiryId: latestInquiry.id,
+          aiResponse: aiResponse
         }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
     }
 
-    const response = prepareResponse(latestInquiry, inquiryId);
+    const response = prepareResponse(latestInquiry, inquiryId, aiResponse);
     return new Response(JSON.stringify(response), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
   } catch (error) {
@@ -249,7 +274,7 @@ async function saveInquiry(supabase: any, extractedData: ExtractedData, patientI
   }
 }
 
-function prepareResponse(inquiry: any, inquiryId: string): ChatResponse {
+function prepareResponse(inquiry: any, inquiryId: string, aiResponse?: string): ChatResponse {
   const missingInfo: string[] = [];
   if (!inquiry.extracted_specialty) missingInfo.push("problem");
   if (!inquiry.requested_schedule) missingInfo.push("schedule");
@@ -260,37 +285,95 @@ function prepareResponse(inquiry: any, inquiryId: string): ChatResponse {
       success: true,
       nextAction: "find-therapist",
       inquiryId,
-      message: "Thank you! I have all the information I need. Let me find the best therapist match for you.",
+      message: aiResponse || "Thank you! I have all the information I need. Let me find the best therapist matches for you.",
+      aiResponse: aiResponse
     };
   }
 
-  const followUpQuestion = generateFollowUpQuestion(missingInfo, inquiry);
   return {
     success: true,
-    followUpQuestion,
     nextAction: "awaiting-info",
     inquiryId,
-    message: followUpQuestion,
+    message: aiResponse || "I need a bit more information to help you better.",
+    aiResponse: aiResponse
   };
 }
 
-function generateFollowUpQuestion(
-  missingInfo: string[],
-  inquiryData: any
-): string {
-  const acknowledgedParts: string[] = [];
-  if (inquiryData.extracted_specialty) acknowledgedParts.push(`I understand you're dealing with ${inquiryData.extracted_specialty}`);
-  if (inquiryData.requested_schedule) acknowledgedParts.push(`and you prefer ${inquiryData.requested_schedule}`);
-  const acknowledgment = acknowledgedParts.length > 0 ? acknowledgedParts.join(", ") + ". " : "";
+async function generateConversationalResponse(
+  userMessage: string,
+  conversationHistory: Array<{ role: string; content: string }>,
+  inquiry: any,
+  extractedData: ExtractedData
+): Promise<string> {
+  const apiKey = Deno.env.get("GEMINI_API_KEY")?.trim();
+  if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set");
+  const client = new GoogleGenAI({ apiKey });
 
-  if (missingInfo.includes("problem")) return `${acknowledgment}Could you tell me more about what you'd like help with? For example, are you dealing with anxiety, depression, stress, relationship issues, or something else?`;
-  if (missingInfo.includes("schedule")) return `${acknowledgment}When would you prefer to have your appointments? Please let me know your preferred days and times.`;
-  if (missingInfo.includes("insurance")) return `${acknowledgment}Do you have health insurance? If so, which provider? This will help me find therapists that accept your insurance.`;
-  
-  return `${acknowledgment}I need a bit more information to find the perfect therapist for you.`;
+  let contextMessages = "";
+  if (conversationHistory && conversationHistory.length > 0) {
+    const recentHistory = conversationHistory.slice(-6); // Last 3 exchanges
+    contextMessages = recentHistory.map((msg) => `${msg.role}: ${msg.content}`).join("\n") + "\n\n";
+  }
+
+  // Build context about what we know
+  let knownContext = "";
+  if (inquiry) {
+    if (inquiry.extracted_specialty) knownContext += `The user mentioned dealing with: ${inquiry.extracted_specialty}. `;
+    if (inquiry.requested_schedule) knownContext += `They prefer scheduling around: ${inquiry.requested_schedule}. `;
+    if (inquiry.insurance_info) knownContext += `Their insurance is: ${inquiry.insurance_info}. `;
+  }
+
+  // Determine what we still need
+  const missingInfo: string[] = [];
+  if (!inquiry?.extracted_specialty && extractedData.problem === 'not specified') missingInfo.push("what they'd like help with");
+  if (!inquiry?.requested_schedule && extractedData.schedule === 'not specified') missingInfo.push("their preferred schedule");
+  if (!inquiry?.insurance_info && extractedData.insurance === 'not specified') missingInfo.push("their insurance information");
+
+  const prompt = `You are an empathetic, warm, and professional therapy scheduling assistant. Your role is to help people find the right therapist in a conversational, human way.
+
+Conversation so far:
+${contextMessages}
+
+What we know about the user: ${knownContext || "Just starting the conversation."}
+
+User's current message: "${userMessage}"
+
+Your task:
+1. Respond in a warm, conversational, human way - like a caring friend who understands
+2. Show empathy and validate their feelings if they're sharing something difficult
+3. If we're missing information (${missingInfo.length > 0 ? missingInfo.join(", ") : "nothing - we have everything"}), gently ask for it in a natural way
+4. Keep responses concise but warm (2-3 sentences max)
+5. Don't sound robotic or overly formal
+6. Use casual, friendly language while remaining professional
+
+${missingInfo.length === 0 ? "Since we have all the information, let them know you're going to find great therapist matches for them." : ""}
+
+Generate ONLY the assistant's response message (no labels, no JSON, just the natural conversational text):`;
+
+  try {
+    const response = await client.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: { temperature: 0.8, maxOutputTokens: 200 }
+    });
+    const generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    return generatedText || "I'm here to help you find the right therapist. Could you tell me what brings you here today?";
+  } catch (error: any) {
+    console.warn("Failed to generate conversational response:", error.message || error);
+    // Fallback to basic response
+    if (missingInfo.length > 0) {
+      return `I'd love to help you find the right therapist. Could you tell me a bit more about ${missingInfo[0]}?`;
+    }
+    return "Thanks for sharing that with me. Let me find some great therapist options for you.";
+  }
 }
 
-async function extractInfoWithGemini(userMessage: string, conversationHistory?: Array<{ role: string; content: string }>, inquiry?: any): Promise<ExtractedData> {
+async function extractInfoWithGemini(
+  userMessage: string,
+  conversationHistory?: Array<{ role: string; content: string }>,
+  inquiry?: any,
+  pendingTherapistMatches?: any
+): Promise<ExtractedData> {
   const apiKey = Deno.env.get("GEMINI_API_KEY")?.trim();
   if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set");
   const client = new GoogleGenAI({ apiKey });
@@ -304,9 +387,13 @@ async function extractInfoWithGemini(userMessage: string, conversationHistory?: 
     ? `The user has been matched with a therapist and was asked if they want to book. Analyze their response for booking intent. If they provide a time, extract it into the 'schedule' field.`
     : "";
 
-  // Hardcoded safety check for simple greetings to prevent hallucination
+  const therapistSelectionPrompt = pendingTherapistMatches
+    ? `The user was presented with therapist options. Check if they're selecting one (e.g., "first one", "number 2", "the second therapist", "option 1"). If so, extract the number (1, 2, or 3) into therapist_selection field.`
+    : "";
+
+  // Hardcoded safety check for simple greetings
   const lowerMsg = userMessage.toLowerCase().trim();
-  const greetings = ['hi', 'hello', 'hey', 'heyy', 'greetings', 'yo', 'sup'];
+  const greetings = ['hi', 'hello', 'hey', 'heyy', 'greetings', 'yo', 'sup', 'good morning', 'good afternoon', 'good evening'];
   if (lowerMsg.length < 20 && greetings.some(g => lowerMsg.includes(g))) {
       return {
           problem: "not specified",
@@ -329,12 +416,14 @@ ${contextMessages}
 ${knownInfo}
 Current user message: ${userMessage}
 ${bookingPrompt}
+${therapistSelectionPrompt}
 
 Extract the following information:
-1. Main problem/symptoms.
+1. Main problem/symptoms (or mental health concern).
 2. Preferred schedule times.
 3. Insurance provider.
 4. Booking Intent ("yes", "no", "clarification", or "not specified").
+${therapistSelectionPrompt ? "5. Therapist Selection (1, 2, or 3 if they're choosing from options, otherwise null)." : ""}
 
 Guidelines: 
 - Use "not specified" for ANY missing information that represents a NEW detail not already known.
@@ -343,7 +432,7 @@ Guidelines:
 - Only extract "problem" if the user describes a medical or psychological issue.
 
 Format your output strictly as JSON:
-{"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."}`;
+{"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."${therapistSelectionPrompt ? ', "therapist_selection": null or 1-3' : ''}}`;
 
   const modelsToTry = ['gemini-2.5-flash'];
   for (const modelName of modelsToTry) {

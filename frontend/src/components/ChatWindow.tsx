@@ -17,7 +17,7 @@ type Message = { sender: "user" | "bot"; text: string };
 
 export default function ChatWindow() {
   const [messages, setMessages] = useState<Message[]>([
-    { sender: "bot", text: "Hello! I'm Akhand's AI assistant. I can help you book appointments or answer questions about our services." }
+    { sender: "bot", text: "Hi there! 👋 I'm here to help you find the right therapist. Whether you're dealing with anxiety, depression, relationship issues, or just need someone to talk to - I'm here to listen and connect you with someone who can help. What brings you here today?" }
   ]);
   // Use a random ID per session for demo purposes, ensuring a fresh conversation on refresh
   const [patientId] = useState(`anon-${Math.random().toString(36).substring(7)}`);
@@ -36,13 +36,22 @@ export default function ChatWindow() {
 
 
   const [matchedTherapistId, setMatchedTherapistId] = useState<string | null>(null);
+  const [pendingTherapistMatches, setPendingTherapistMatches] = useState<any[] | null>(null);
 
   const sendToHandleChat = async (text: string, currentMatchedId: string | null) => {
+    // Build conversation history from messages
+    const conversationHistory = messages.slice(-10).map(msg => ({
+      role: msg.sender === 'user' ? 'user' : 'assistant',
+      content: msg.text
+    }));
+
     const { data, error } = await supabase.functions.invoke('handle-chat', {
       body: {
         userMessage: text,
         patientId: patientId,
-        matchedTherapistId: currentMatchedId
+        matchedTherapistId: currentMatchedId,
+        pendingTherapistMatches: pendingTherapistMatches,
+        conversationHistory: conversationHistory
       }
     });
 
@@ -64,42 +73,79 @@ export default function ChatWindow() {
     try {
       const data: any = await sendToHandleChat(userMsg, matchedTherapistId);
 
-      // FIX: Use the natural language 'message' from the AI
-      const reply = data?.message || "I processed that, but didn't get a specific response.";
+      // Use the AI-generated conversational response
+      const reply = data?.aiResponse || data?.message || "I processed that, but didn't get a specific response.";
 
-      // Debugging: Log the extracted data to console to verify it's working
+      // Debugging: Log the extracted data to console
       if (data?.extractedData) {
         console.log("AI Extracted:", data.extractedData);
       }
 
       setMessages(prev => [...prev, { sender: "bot", text: reply }]);
 
+      // --- Handle therapist selection ---
+      if (data?.nextAction === 'therapist-selected' && data.therapistId) {
+        setMatchedTherapistId(data.therapistId);
+        setPendingTherapistMatches(null); // Clear pending matches
+
+        setMessages(prev => [...prev, {
+          sender: 'bot',
+          text: "Great choice! When would you like to schedule your appointment? Please let me know your preferred date and time."
+        }]);
+      }
+
       // --- Orchestration Logic ---
       if (data?.nextAction === 'find-therapist' && data.inquiryId) {
-        setMessages(prev => [...prev, { sender: 'bot', text: "🔍 Searching our database for the best specialist..." }]);
+        setMessages(prev => [...prev, { sender: 'bot', text: "🔍 Let me find some great therapists who match your needs..." }]);
 
         const { data: findData, error: findError } = await supabase.functions.invoke('find-therapist', {
-          body: { inquiryId: data.inquiryId }
+          body: { inquiryId: data.inquiryId, limit: 3 }
         });
 
         if (findError) {
           console.error(findError);
           setMessages(prev => [...prev, { sender: 'bot', text: "I encountered an error searching for therapists." }]);
         } else if (findData.matches && findData.matches.length > 0) {
-          const topMatch = findData.matches[0].therapist;
-          setMatchedTherapistId(topMatch.id);
-          // Inform the user
+          // Store matches for potential selection
+          const therapistOptions = findData.matches.map((m: any) => ({
+            id: m.therapist.id,
+            name: m.therapist.name,
+            specialties: m.therapist.specialties,
+            accepted_insurance: m.therapist.accepted_insurance,
+            bio: m.therapist.bio
+          }));
+          setPendingTherapistMatches(therapistOptions);
+
+          // Show all matches with details
+          let matchesText = "Perfect! I found some great therapists for you:\\n\\n";
+          findData.matches.forEach((match: any, index: number) => {
+            const t = match.therapist;
+            const specialtiesStr = Array.isArray(t.specialties) ? t.specialties.slice(0, 3).join(", ") : "Multiple areas";
+            const insuranceStr = Array.isArray(t.accepted_insurance) ? t.accepted_insurance.slice(0, 2).join(", ") : "Various providers";
+
+            matchesText += `${index + 1}. **${t.name}**\\n`;
+            matchesText += `   Specialties: ${specialtiesStr}\\n`;
+            matchesText += `   Accepts: ${insuranceStr}\\n`;
+            if (t.bio) {
+              const shortBio = t.bio.substring(0, 100) + (t.bio.length > 100 ? "..." : "");
+              matchesText += `   ${shortBio}\\n`;
+            }
+            matchesText += "\\n";
+          });
+
+          matchesText += "Which therapist would you like to book with? Just let me know the number (e.g., '1', 'the first one', 'number 2', etc.)";
+
           setMessages(prev => [...prev, {
             sender: 'bot',
-            text: `I found a match!\n\nDr. ${topMatch.name}\nMatches your needs for: ${topMatch.specialties?.join(", ")}\n\nWould you like to book an appointment with them?`
+            text: matchesText
           }]);
         } else {
-          setMessages(prev => [...prev, { sender: 'bot', text: "I couldn't find a therapist matching your specific criteria right now." }]);
+          setMessages(prev => [...prev, { sender: 'bot', text: "I couldn't find any therapists matching your specific criteria right now. Would you like to adjust your requirements?" }]);
         }
       }
 
       if (data?.nextAction === 'book-appointment' && data.therapistId && data.startTime) {
-        setMessages(prev => [...prev, { sender: 'bot', text: "📅 Booking your appointment now..." }]);
+        setMessages(prev => [...prev, { sender: 'bot', text: "📅 Perfect! Let me book that appointment for you..." }]);
 
         const { data: bookData, error: bookError } = await supabase.functions.invoke('book-appointment', {
           body: {
@@ -113,21 +159,25 @@ export default function ChatWindow() {
         });
 
         if (bookError) {
-          setMessages(prev => [...prev, { sender: 'bot', text: `Failed to book: ${bookError.message}` }]);
+          setMessages(prev => [...prev, { sender: 'bot', text: `I had trouble booking that appointment: ${bookError.message}. Could you try a different time?` }]);
         } else {
           const dateStr = new Date(data.startTime).toLocaleString();
-          setMessages(prev => [...prev, { sender: 'bot', text: `✅ SUCCESS! Appointment confirmed for ${dateStr}.` }]);
+          setMessages(prev => [...prev, { sender: 'bot', text: `✅ All set! Your appointment is confirmed for ${dateStr}. You should receive a confirmation shortly.` }]);
 
           if (bookData?.googleCalendarError) {
-            setMessages(prev => [...prev, { sender: 'bot', text: `⚠️ Calendar Sync Warning: The appointment was saved locally, but failed to sync to Google Calendar.\n\nReason: ${bookData.googleCalendarError}` }]);
+            setMessages(prev => [...prev, { sender: 'bot', text: `⚠️ Note: The appointment was saved, but there was an issue syncing with the therapist's Google Calendar. They'll still see your appointment in our system.` }]);
           } else {
-            setMessages(prev => [...prev, { sender: 'bot', text: `📅 A Google Calendar invite has been sent to the therapist.` }]);
+            setMessages(prev => [...prev, { sender: 'bot', text: `📧 A calendar invite has been sent to your therapist. Looking forward to your session!` }]);
           }
+
+          // Clear state after successful booking
+          setMatchedTherapistId(null);
+          setPendingTherapistMatches(null);
         }
       }
 
     } catch (err: any) {
-      setMessages(prev => [...prev, { sender: "bot", text: "I apologize, but I'm having trouble connecting right now. Please try again later." }]);
+      setMessages(prev => [...prev, { sender: "bot", text: "I'm having a bit of trouble connecting right now. Could you try that again?" }]);
       console.error(err);
     } finally {
       setLoading(false);
