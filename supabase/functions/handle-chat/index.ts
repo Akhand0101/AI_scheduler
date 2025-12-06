@@ -221,6 +221,18 @@ async function extractInfoWithGemini(userMessage: string, conversationHistory?: 
     ? `The user has been matched with a therapist and was asked if they want to book. Analyze their response for booking intent. If they provide a time, extract it into the 'schedule' field.`
     : "";
 
+  // Hardcoded safety check for simple greetings to prevent hallucination
+  const lowerMsg = userMessage.toLowerCase().trim();
+  const greetings = ['hi', 'hello', 'hey', 'heyy', 'greetings', 'yo', 'sup'];
+  if (lowerMsg.length < 20 && greetings.some(g => lowerMsg.includes(g))) {
+      return {
+          problem: "not specified",
+          schedule: "not specified",
+          insurance: "not specified",
+          booking_intent: "not specified"
+      };
+  }
+
   const prompt = `You are a healthcare scheduling assistant.
 ${contextMessages}Current user message: ${userMessage}
 ${bookingPrompt}
@@ -229,7 +241,13 @@ Extract the following information:
 2. Preferred schedule times.
 3. Insurance provider.
 4. Booking Intent ("yes", "no", "clarification", or "not specified").
-Guidelines: Use "not specified" for missing information. The booking_intent should only be filled if a therapist has been matched.
+
+Guidelines: 
+- Use "not specified" for ANY missing information. 
+- Do NOT hallucinate. 
+- If the user only says "hello" or "hi", ALL fields MUST be "not specified".
+- Only extract "problem" if the user describes a medical or psychological issue.
+
 Format your output strictly as JSON:
 {"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."}`;
 
