@@ -38,51 +38,48 @@ export default function AdminPage() {
 
   const handleConnectCalendar = () => {
     const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+
     if (!clientId) {
       alert("Configuration Error: VITE_GOOGLE_CLIENT_ID is missing in your frontend .env file. Please add it to enable calendar integration.");
       return;
     }
 
-    // Redirect back to this page after Google login
-    const redirectUri = window.location.origin + '/admin';
-    const scope = 'https://www.googleapis.com/auth/calendar.events'; // Scope to manage events
+    if (!supabaseUrl) {
+      alert("Configuration Error: VITE_SUPABASE_URL is missing in your frontend .env file.");
+      return;
+    }
 
-    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}&access_type=offline&prompt=consent`;
+    if (!therapist?.id) {
+      alert("Error: Unable to identify therapist. Please refresh the page and try again.");
+      return;
+    }
+
+    // Redirect to the Supabase Edge Function, which will handle the token exchange
+    // and then redirect back to /admin with ?success=true
+    const redirectUri = `${supabaseUrl}/functions/v1/google-callback`;
+    const scope = 'https://www.googleapis.com/auth/calendar.events';
+
+    // Pass therapist ID as state to identify which therapist is connecting
+    const state = therapist.id;
+
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}&access_type=offline&prompt=consent&state=${state}`;
 
     window.location.href = authUrl;
   };
 
-  // Handle OAuth callback (checking for ?code= in URL)
+  // Handle successful OAuth callback (checking for ?success=true in URL)
   useEffect(() => {
-    async function handleOAuthCallback() {
-      const params = new URLSearchParams(window.location.search);
-      const code = params.get('code');
+    const params = new URLSearchParams(window.location.search);
+    const success = params.get('success');
 
-      if (code && session) {
-        // Clean URL to avoid re-triggering on refresh
-        window.history.replaceState({}, document.title, window.location.pathname);
+    if (success === 'true' && session) {
+      // Clean URL to avoid re-triggering on refresh
+      window.history.replaceState({}, document.title, window.location.pathname);
 
-        try {
-          const redirectUri = window.location.origin + '/admin';
-          const { error } = await supabase.functions.invoke('oauth-callback', {
-            body: { code, redirect_uri: redirectUri }
-          });
-
-          if (error) throw error;
-
-          alert("Calendar connected successfully!");
-          // Refresh admin data to show "Connected" status
-          getAdminData();
-
-        } catch (error: any) {
-          console.error("OAuth Error:", error);
-          alert(`Failed to connect calendar: ${error.message || error}`);
-        }
-      }
-    }
-
-    if (session) {
-      handleOAuthCallback();
+      alert("Calendar connected successfully!");
+      // Refresh admin data to show "Connected" status
+      getAdminData();
     }
   }, [session]);
 

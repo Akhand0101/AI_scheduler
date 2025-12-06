@@ -15,7 +15,13 @@ serve(async (req) => {
     // 1. Exchange Code for Tokens
     const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
     const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
-    const redirectUri = 'https://qhuqwljmphigdvcwwzgg.supabase.co/functions/v1/google-callback' // UPDATE THIS!
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')
+    
+    if (!supabaseUrl) {
+      throw new Error('SUPABASE_URL environment variable not set')
+    }
+    
+    const redirectUri = `${supabaseUrl}/functions/v1/google-callback`
 
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
@@ -39,7 +45,6 @@ serve(async (req) => {
     }
 
     // 2. Save Refresh Token to Supabase
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')! // Use SERVICE ROLE to bypass RLS
     const supabase = createClient(supabaseUrl, supabaseKey)
 
