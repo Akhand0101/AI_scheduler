@@ -87,11 +87,7 @@ export default function ChatWindow() {
       if (data?.nextAction === 'therapist-selected' && data.therapistId) {
         setMatchedTherapistId(data.therapistId);
         setPendingTherapistMatches(null); // Clear pending matches
-
-        setMessages(prev => [...prev, {
-          sender: 'bot',
-          text: "Great choice! When would you like to schedule your appointment? Please let me know your preferred date and time."
-        }]);
+        // AI response already included in 'reply' - no need for duplicate message
       }
 
       // --- Orchestration Logic ---
@@ -117,20 +113,20 @@ export default function ChatWindow() {
           setPendingTherapistMatches(therapistOptions);
 
           // Show all matches with details
-          let matchesText = "Perfect! I found some great therapists for you:\\n\\n";
+          let matchesText = "Perfect! I found some great therapists for you:\n\n";
           findData.matches.forEach((match: any, index: number) => {
             const t = match.therapist;
             const specialtiesStr = Array.isArray(t.specialties) ? t.specialties.slice(0, 3).join(", ") : "Multiple areas";
             const insuranceStr = Array.isArray(t.accepted_insurance) ? t.accepted_insurance.slice(0, 2).join(", ") : "Various providers";
 
-            matchesText += `${index + 1}. **${t.name}**\\n`;
-            matchesText += `   Specialties: ${specialtiesStr}\\n`;
-            matchesText += `   Accepts: ${insuranceStr}\\n`;
+            matchesText += `${index + 1}. ${t.name}\n`;
+            matchesText += `   • Specialties: ${specialtiesStr}\n`;
+            matchesText += `   • Accepts: ${insuranceStr}\n`;
             if (t.bio) {
               const shortBio = t.bio.substring(0, 100) + (t.bio.length > 100 ? "..." : "");
-              matchesText += `   ${shortBio}\\n`;
+              matchesText += `   • About: ${shortBio}\n`;
             }
-            matchesText += "\\n";
+            matchesText += "\n";
           });
 
           matchesText += "Which therapist would you like to book with? Just let me know the number (e.g., '1', 'the first one', 'number 2', etc.)";
@@ -161,14 +157,27 @@ export default function ChatWindow() {
         if (bookError) {
           setMessages(prev => [...prev, { sender: 'bot', text: `I had trouble booking that appointment: ${bookError.message}. Could you try a different time?` }]);
         } else {
-          const dateStr = new Date(data.startTime).toLocaleString();
-          setMessages(prev => [...prev, { sender: 'bot', text: `✅ All set! Your appointment is confirmed for ${dateStr}. You should receive a confirmation shortly.` }]);
+          const appointmentDate = new Date(data.startTime);
+          const dateOptions: Intl.DateTimeFormatOptions = {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true
+          };
+          const dateStr = appointmentDate.toLocaleDateString('en-US', dateOptions);
+
+          let confirmMessage = `✅ All set! Your appointment is confirmed for:\n\n${dateStr}\n\n`;
 
           if (bookData?.googleCalendarError) {
-            setMessages(prev => [...prev, { sender: 'bot', text: `⚠️ Note: The appointment was saved, but there was an issue syncing with the therapist's Google Calendar. They'll still see your appointment in our system.` }]);
+            confirmMessage += `⚠️ Note: The appointment was saved, but there was an issue syncing with the therapist's Google Calendar. They'll still see your appointment in our system.`;
           } else {
-            setMessages(prev => [...prev, { sender: 'bot', text: `📧 A calendar invite has been sent to your therapist. Looking forward to your session!` }]);
+            confirmMessage += `📧 A calendar invite has been sent to your therapist. Looking forward to your session!`;
           }
+
+          setMessages(prev => [...prev, { sender: 'bot', text: confirmMessage }]);
 
           // Clear state after successful booking
           setMatchedTherapistId(null);

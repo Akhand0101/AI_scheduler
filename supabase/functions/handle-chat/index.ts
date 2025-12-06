@@ -1,7 +1,7 @@
 // Setup type definitions for built-in Supabase Runtime APIs
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { GoogleGenAI } from "npm:@google/genai";
+
 
 // Define types for extracted data and responses
 interface ExtractedData {
@@ -307,11 +307,11 @@ async function generateConversationalResponse(
 ): Promise<string> {
   const apiKey = Deno.env.get("GEMINI_API_KEY")?.trim();
   if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set");
-  const client = new GoogleGenAI({ apiKey });
 
   let contextMessages = "";
   if (conversationHistory && conversationHistory.length > 0) {
-    const recentHistory = conversationHistory.slice(-6); // Last 3 exchanges
+    // Basic mapping: user->user, assistant->model
+    const recentHistory = conversationHistory.slice(-6); 
     contextMessages = recentHistory.map((msg) => `${msg.role}: ${msg.content}`).join("\n") + "\n\n";
   }
 
@@ -323,56 +323,71 @@ async function generateConversationalResponse(
     if (inquiry.insurance_info) knownContext += `Their insurance is: ${inquiry.insurance_info}. `;
   }
 
-  // Determine what we still need
   const missingInfo: string[] = [];
   if (!inquiry?.extracted_specialty && extractedData.problem === 'not specified') missingInfo.push("what they're going through");
   if (!inquiry?.requested_schedule && extractedData.schedule === 'not specified') missingInfo.push("when they're available");
   if (!inquiry?.insurance_info && extractedData.insurance === 'not specified') missingInfo.push("insurance provider");
 
-  const prompt = `You are a warm, empathetic therapy assistant. Your name is "Kai".
-Your goal is to have a NATURAL conversation with the user to help them find a therapist.
-Do NOT treat this as a form to fill out. Treat it as a supportive chat.
-
-Conversation History:
-${contextMessages}
-
-User's Profile (What we know):
+  const systemInstruction = `You are a warm, empathetic therapy assistant named "Kai".
+Goal: Have a NATURAL conversation to help the user find a therapist.
+Context:
 ${knownContext || "No details yet."}
 
-User's Latest Message: "${userMessage}"
-
-Missing details we eventually need: ${missingInfo.length > 0 ? missingInfo.join(", ") : "None - we have everything!"}
-
 Instructions:
-1. **Be Human First**: Acknowledge what the user just said *before* asking for anything new. If they shared something painful, validate it.
-2. **One Thing at a Time**: If multiple details are missing, DO NOT ask for all of them at once. Pick ONE natural follow-up question.
-   - Example: If you need schedule and insurance, simply ask "What times usually work best for you?" first.
-3. **Flow**: Make the conversation flow naturally. Don't abrupt change topics.
-4. **Style**: concise (1-3 sentences), warm, professional but casual.
-5. **No Lists**: Avoid bullet points or numbered lists unless absolutely necessary.
-6. If the user greets you, greet them back warmly and ask how you can support them today.
-7. If we have ALL info (problem, schedule, insurance), respectfully say you'll look for matches now.
+1. Acknowledge what the user said first. Validate their feelings.
+2. Ask for missing info (${missingInfo.join(", ")}) ONE piece at a time.
+3. Keep it brief (2-3 sentences). Warm and professional.
+`;
 
-Generate ONLY the response text.`;
+  const contents = [
+    {
+      role: "user",
+      parts: [{ text: `Conversation History:\n${contextMessages}\n\nUser's Request: ${userMessage}` }]
+    }
+  ];
 
-  const modelsToTry = ['gemini-2.5-flash'];
-  for (const modelName of modelsToTry) {
+  // Using actual available models from the API
+  const strategies = [
+    { model: "gemini-2.5-flash", version: "v1beta" },      // User's requested model
+    { model: "gemini-flash-latest", version: "v1beta" },   // Latest flash
+    { model: "gemini-2.0-flash", version: "v1beta" },      // 2.0 flash fallback
+    { model: "gemini-pro-latest", version: "v1beta" }      // Pro fallback
+  ];
+
+  for (const strategy of strategies) {
     try {
-      console.log(`Generating conversational response with: ${modelName}`);
-      const response = await client.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: { temperature: 0.7, maxOutputTokens: 250 }
+      console.log(`[REST] Attempting ${strategy.model} on ${strategy.version}...`);
+      const url = `https://generativelanguage.googleapis.com/${strategy.version}/models/${strategy.model}:generateContent?key=${apiKey}`;
+      
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: contents,
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 250
+          }
+        })
       });
-      const generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-      return generatedText || "I'm listening. Could you tell me a bit more?";
-    } catch (error: any) {
-      console.warn(`Failed conversation with ${modelName}:`, error.message || error);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        console.error(`[REST] Error from ${strategy.model} (${strategy.version}):`, data.error?.message);
+        continue; 
+      }
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) return text;
+      
+    } catch (err: any) {
+      console.error(`[REST] Failed ${strategy.model}:`, err.message);
     }
   }
 
-  // Fallback if AI fails
-  return "I'm here to support you. Could you share a bit more about what you're looking for?";
+  return "I'm hearing you, but I'm having a little trouble connecting. Could you say that again?";
 }
 
 async function extractInfoWithGemini(
@@ -383,7 +398,6 @@ async function extractInfoWithGemini(
 ): Promise<ExtractedData> {
   const apiKey = Deno.env.get("GEMINI_API_KEY")?.trim();
   if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set");
-  const client = new GoogleGenAI({ apiKey });
 
   let contextMessages = "";
   if (conversationHistory && conversationHistory.length > 0) {
@@ -418,45 +432,79 @@ async function extractInfoWithGemini(
       if (inquiry.insurance_info) knownInfo += `- Insurance: ${inquiry.insurance_info}\n`;
   }
 
-  const prompt = `You are a healthcare scheduling assistant.
-${contextMessages}
+  const systemInstruction = `You are a healthcare booking data extractor.
+Goals: Extract problem, schedule, insurance, booking intent.
+Output Check: "not specified" for missing fields.
+
+Guidelines:
+1. "problem": only if user mentions medical/psych issue.
+2. "schedule": preferred times.
+3. "insurance": provider name.
+4. "booking_intent": yes/no/clarification/not specified.
+${therapistSelectionPrompt ? '5. "therapist_selection": 1, 2, or 3 (or null).' : ''}
+
+Output strictly JSON.`;
+
+  const prompt = `
+Known Info:
 ${knownInfo}
-Current user message: ${userMessage}
+
+Context:
+${contextMessages}
+
+Current Message: "${userMessage}"
 ${bookingPrompt}
 ${therapistSelectionPrompt}
 
-Extract the following information:
-1. Main problem/symptoms (or mental health concern).
-2. Preferred schedule times.
-3. Insurance provider.
-4. Booking Intent ("yes", "no", "clarification", or "not specified").
-${therapistSelectionPrompt ? "5. Therapist Selection (1, 2, or 3 if they're choosing from options, otherwise null)." : ""}
+Extract JSON:
+{"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."${therapistSelectionPrompt ? ', "therapist_selection": null' : ''}}`;
 
-Guidelines: 
-- Use "not specified" for ANY missing information that represents a NEW detail not already known.
-- If information is already listed in "Known Information", PRESERVE it unless the user explicitly changes it.
-- If the user confirms a question (e.g. "yes I do"), infer the answer from context if possible or mark as "not specified" if specific details are still needed.
-- Only extract "problem" if the user describes a medical or psychological issue.
+  // Using actual available models from the API
+  const strategies = [
+    { model: "gemini-2.5-flash", version: "v1beta" },      // User's requested model
+    { model: "gemini-flash-latest", version: "v1beta" },   // Latest flash
+    { model: "gemini-2.0-flash", version: "v1beta" },      // 2.0 flash fallback
+    { model: "gemini-pro-latest", version: "v1beta" }      // Pro fallback
+  ];
 
-Format your output strictly as JSON:
-{"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."${therapistSelectionPrompt ? ', "therapist_selection": null or 1-3' : ''}}`;
-
-  const modelsToTry = ['gemini-2.5-flash'];
-  for (const modelName of modelsToTry) {
+  for (const strategy of strategies) {
     try {
-      console.log(`Attempting Gemini Request using model: ${modelName}`);
-      const response = await client.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 1024 }
+      console.log(`[REST-EXTRACT] Attempting ${strategy.model} on ${strategy.version}...`);
+      const url = `https://generativelanguage.googleapis.com/${strategy.version}/models/${strategy.model}:generateContent?key=${apiKey}`;
+      
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          generationConfig: {
+            responseMimeType: "application/json",
+            temperature: 0.1
+          }
+        })
       });
-      const generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!generatedText) throw new Error("Empty response from AI SDK");
-      console.log(`Success with model: ${modelName}`);
-      return JSON.parse(generatedText) as ExtractedData;
-    } catch (error: any) {
-      console.warn(`Failed with model ${modelName}:`, error.message || error);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        console.error(`[REST-EXTRACT] Error from ${strategy.model} (${strategy.version}):`, data.error?.message);
+        continue;
+      }
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) {
+        try {
+          return JSON.parse(text) as ExtractedData;
+        } catch (e) {
+             console.error("JSON parse error:", text);
+        }
+      }
+      
+    } catch (err: any) {
+      console.error(`[REST-EXTRACT] Failed ${strategy.model}:`, err.message);
     }
   }
-  throw new Error("All Gemini models failed.");
+  
+  throw new Error("All Gemini models failed extraction.");
 }
