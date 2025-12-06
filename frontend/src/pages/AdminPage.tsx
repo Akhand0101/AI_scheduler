@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../supabaseClient";
-import AdminLogin from "../components/AdminLogin";
+import AdminLoginPassword from "../components/AdminLoginPassword";
 import InquiryList from "../components/InquiryList";
 import AppointmentList from "../components/AppointmentList";
 import { Box, Button, Typography, Paper, Container, Chip } from "@mui/material";
@@ -96,7 +96,7 @@ export default function AdminPage() {
           <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
             Please sign in to manage appointments and inquiries.
           </Typography>
-          <AdminLogin />
+          <AdminLoginPassword />
         </Paper>
       </Container>
     );
