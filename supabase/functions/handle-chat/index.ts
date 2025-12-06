@@ -233,9 +233,20 @@ async function extractInfoWithGemini(userMessage: string, conversationHistory?: 
       };
   }
 
+  // Construct known info string
+  let knownInfo = "Known Information so far:\n";
+  if (inquiry) {
+      if (inquiry.extracted_specialty) knownInfo += `- Problem: ${inquiry.extracted_specialty}\n`;
+      if (inquiry.requested_schedule) knownInfo += `- Schedule: ${inquiry.requested_schedule}\n`;
+      if (inquiry.insurance_info) knownInfo += `- Insurance: ${inquiry.insurance_info}\n`;
+  }
+
   const prompt = `You are a healthcare scheduling assistant.
-${contextMessages}Current user message: ${userMessage}
+${contextMessages}
+${knownInfo}
+Current user message: ${userMessage}
 ${bookingPrompt}
+
 Extract the following information:
 1. Main problem/symptoms.
 2. Preferred schedule times.
@@ -243,9 +254,9 @@ Extract the following information:
 4. Booking Intent ("yes", "no", "clarification", or "not specified").
 
 Guidelines: 
-- Use "not specified" for ANY missing information. 
-- Do NOT hallucinate. 
-- If the user only says "hello" or "hi", ALL fields MUST be "not specified".
+- Use "not specified" for ANY missing information that represents a NEW detail not already known.
+- If information is already listed in "Known Information", PRESERVE it unless the user explicitly changes it.
+- If the user confirms a question (e.g. "yes I do"), infer the answer from context if possible or mark as "not specified" if specific details are still needed.
 - Only extract "problem" if the user describes a medical or psychological issue.
 
 Format your output strictly as JSON:
