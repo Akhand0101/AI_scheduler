@@ -11,7 +11,12 @@ export default function AdminLogin() {
     if (!email) return;
     setLoading(true);
     setMsg(null);
-    const { error } = await supabase.auth.signInWithOtp({ email }); // magic link by default
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: window.location.origin + '/admin'
+      }
+    });
     if (error) {
       setMsg({ type: 'error', text: error.message });
     } else {
