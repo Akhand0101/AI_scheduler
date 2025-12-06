@@ -352,7 +352,7 @@ Generate ONLY the assistant's response message (no labels, no JSON, just the nat
 
   try {
     const response = await client.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-1.5-flash',
       contents: prompt,
       config: { temperature: 0.8, maxOutputTokens: 200 }
     });
@@ -434,7 +434,7 @@ Guidelines:
 Format your output strictly as JSON:
 {"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."${therapistSelectionPrompt ? ', "therapist_selection": null or 1-3' : ''}}`;
 
-  const modelsToTry = ['gemini-2.5-flash'];
+  const modelsToTry = ['gemini-1.5-flash'];
   for (const modelName of modelsToTry) {
     try {
       console.log(`Attempting Gemini Request using model: ${modelName}`);
