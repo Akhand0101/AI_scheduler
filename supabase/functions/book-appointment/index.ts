@@ -38,6 +38,7 @@ Deno.serve(async (req) => {
     }
     
     let googleCalendarEventId: string | null = null;
+    let googleCalendarError: string | null = null;
 
     // Steps 4 & 5: Only run if a refresh token is available
     if (therapist?.google_refresh_token) {
@@ -45,20 +46,24 @@ Deno.serve(async (req) => {
         // 4. Get Google Access Token
         const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
         const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
+        
+        if (!clientId || !clientSecret) throw new Error("Google Client ID/Secret missing in secrets.");
 
         const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
-            client_id: clientId!,
-            client_secret: clientSecret!,
+            client_id: clientId,
+            client_secret: clientSecret,
             refresh_token: therapist.google_refresh_token,
             grant_type: 'refresh_token',
           }),
         })
 
         const tokenData = await tokenResponse.json()
-        if (!tokenData.access_token) throw new Error("Failed to refresh Google access token")
+        if (!tokenData.access_token) {
+             throw new Error(`Failed to refresh Google access token: ${JSON.stringify(tokenData)}`)
+        }
 
         // 5. Create Event on Google Calendar
         const calendarId = therapist.google_calendar_id || 'primary'
@@ -82,16 +87,19 @@ Deno.serve(async (req) => {
         )
 
         const eventData = await calendarResponse.json()
-        if (!eventData.id) throw new Error("Failed to create Google Calendar event")
+        if (!eventData.id) {
+            throw new Error(`Failed to create Google Calendar event: ${JSON.stringify(eventData)}`)
+        }
         
         googleCalendarEventId = eventData.id;
 
-      } catch (e) {
-        console.warn(`Google Calendar integration failed for therapist ${therapistId}. Proceeding without it. Error: ${e.message}`);
-        // Do not re-throw, allow booking to proceed without calendar event
+      } catch (e: any) {
+        console.warn(`Google Calendar integration failed: ${e.message}`);
+        googleCalendarError = e.message;
       }
     } else {
-      console.warn(`[WARINING] Therapist ${therapistId} has no Google Calendar refresh token. Skipping event creation. proceeding with appointment.`);
+      googleCalendarError = "No Google Refresh Token found for therapist.";
+      console.warn(`[WARNING] Therapist ${therapistId} has no Google Calendar refresh token.`);
     }
 
     // 6. Save to Supabase 'appointments' table
@@ -119,7 +127,7 @@ Deno.serve(async (req) => {
     }
 
     return new Response(
-      JSON.stringify({ success: true, appointment }),
+      JSON.stringify({ success: true, appointment, googleCalendarError }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 

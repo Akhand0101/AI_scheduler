@@ -101,7 +101,7 @@ export default function ChatWindow() {
       if (data?.nextAction === 'book-appointment' && data.therapistId && data.startTime) {
         setMessages(prev => [...prev, { sender: 'bot', text: "📅 Booking your appointment now..." }]);
 
-        const { error: bookError } = await supabase.functions.invoke('book-appointment', {
+        const { data: bookData, error: bookError } = await supabase.functions.invoke('book-appointment', {
           body: {
             inquiryId: data.inquiryId,
             therapistId: data.therapistId,
@@ -115,7 +115,13 @@ export default function ChatWindow() {
           setMessages(prev => [...prev, { sender: 'bot', text: `Failed to book: ${bookError.message}` }]);
         } else {
           const dateStr = new Date(data.startTime).toLocaleString();
-          setMessages(prev => [...prev, { sender: 'bot', text: `✅ SUCCESSS! Appointment confirmed for ${dateStr}.` }]);
+          setMessages(prev => [...prev, { sender: 'bot', text: `✅ SUCCESS! Appointment confirmed for ${dateStr}.` }]);
+
+          if (bookData?.googleCalendarError) {
+            setMessages(prev => [...prev, { sender: 'bot', text: `⚠️ Calendar Sync Warning: The appointment was saved locally, but failed to sync to Google Calendar.\n\nReason: ${bookData.googleCalendarError}` }]);
+          } else {
+            setMessages(prev => [...prev, { sender: 'bot', text: `📅 A Google Calendar invite has been sent to the therapist.` }]);
+          }
         }
       }
 
