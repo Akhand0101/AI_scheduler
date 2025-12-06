@@ -19,6 +19,8 @@ export default function ChatWindow() {
   const [messages, setMessages] = useState<Message[]>([
     { sender: "bot", text: "Hello! I'm Akhand's AI assistant. I can help you book appointments or answer questions about our services." }
   ]);
+  // Use a random ID per session for demo purposes, ensuring a fresh conversation on refresh
+  const [patientId] = useState(`anon-${Math.random().toString(36).substring(7)}`);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<null | HTMLDivElement>(null);
@@ -33,11 +35,14 @@ export default function ChatWindow() {
 
 
 
-  const sendToHandleChat = async (text: string) => {
+  const [matchedTherapistId, setMatchedTherapistId] = useState<string | null>(null);
+
+  const sendToHandleChat = async (text: string, currentMatchedId: string | null) => {
     const { data, error } = await supabase.functions.invoke('handle-chat', {
       body: {
         userMessage: text,
-        patientId: "anon-123"
+        patientId: patientId,
+        matchedTherapistId: currentMatchedId
       }
     });
 
@@ -57,7 +62,7 @@ export default function ChatWindow() {
     setLoading(true);
 
     try {
-      const data: any = await sendToHandleChat(userMsg);
+      const data: any = await sendToHandleChat(userMsg, matchedTherapistId);
 
       // FIX: Use the natural language 'message' from the AI
       const reply = data?.message || "I processed that, but didn't get a specific response.";
@@ -68,6 +73,52 @@ export default function ChatWindow() {
       }
 
       setMessages(prev => [...prev, { sender: "bot", text: reply }]);
+
+      // --- Orchestration Logic ---
+      if (data?.nextAction === 'find-therapist' && data.inquiryId) {
+        setMessages(prev => [...prev, { sender: 'bot', text: "🔍 Searching our database for the best specialist..." }]);
+
+        const { data: findData, error: findError } = await supabase.functions.invoke('find-therapist', {
+          body: { inquiryId: data.inquiryId }
+        });
+
+        if (findError) {
+          console.error(findError);
+          setMessages(prev => [...prev, { sender: 'bot', text: "I encountered an error searching for therapists." }]);
+        } else if (findData.matches && findData.matches.length > 0) {
+          const topMatch = findData.matches[0].therapist;
+          setMatchedTherapistId(topMatch.id);
+          // Inform the user
+          setMessages(prev => [...prev, {
+            sender: 'bot',
+            text: `I found a match!\n\nDr. ${topMatch.name}\nMatches your needs for: ${topMatch.specialties?.join(", ")}\n\nWould you like to book an appointment with them?`
+          }]);
+        } else {
+          setMessages(prev => [...prev, { sender: 'bot', text: "I couldn't find a therapist matching your specific criteria right now." }]);
+        }
+      }
+
+      if (data?.nextAction === 'book-appointment' && data.therapistId && data.startTime) {
+        setMessages(prev => [...prev, { sender: 'bot', text: "📅 Booking your appointment now..." }]);
+
+        const { error: bookError } = await supabase.functions.invoke('book-appointment', {
+          body: {
+            inquiryId: data.inquiryId,
+            therapistId: data.therapistId,
+            startTime: data.startTime,
+            endTime: data.endTime,
+            patientName: "Guest Patient"
+          }
+        });
+
+        if (bookError) {
+          setMessages(prev => [...prev, { sender: 'bot', text: `Failed to book: ${bookError.message}` }]);
+        } else {
+          const dateStr = new Date(data.startTime).toLocaleString();
+          setMessages(prev => [...prev, { sender: 'bot', text: `✅ SUCCESSS! Appointment confirmed for ${dateStr}.` }]);
+        }
+      }
+
     } catch (err: any) {
       setMessages(prev => [...prev, { sender: "bot", text: "I apologize, but I'm having trouble connecting right now. Please try again later." }]);
       console.error(err);
