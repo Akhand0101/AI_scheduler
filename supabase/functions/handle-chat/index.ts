@@ -357,12 +357,11 @@ Example good response: "Thanks for sharing that. To match you with the right the
     }
   ];
 
-  // Using actual available models from the API
+  // Using models with best free tier limits (gemini-1.5-flash has 1500 RPD)
   const strategies = [
-    { model: "gemini-2.5-flash", version: "v1beta" },      // User's requested model
-    { model: "gemini-flash-latest", version: "v1beta" },   // Latest flash
-    { model: "gemini-2.0-flash", version: "v1beta" },      // 2.0 flash fallback
-    { model: "gemini-pro-latest", version: "v1beta" }      // Pro fallback
+    { model: "gemini-1.5-flash", version: "v1beta" },        // Best free tier limits
+    { model: "gemini-1.5-flash-latest", version: "v1beta" }, // Latest 1.5 flash
+    { model: "gemini-flash-latest", version: "v1beta" }      // Generic flash fallback
   ];
 
   for (const strategy of strategies) {
@@ -476,12 +475,11 @@ ${therapistSelectionPrompt}
 Extract JSON:
 {"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."${therapistSelectionPrompt ? ', "therapist_selection": null' : ''}}`;
 
-  // Using actual available models from the API
+  // Using models with best free tier limits (gemini-1.5-flash has 1500 RPD)
   const strategies = [
-    { model: "gemini-2.5-flash", version: "v1beta" },      // User's requested model
-    { model: "gemini-flash-latest", version: "v1beta" },   // Latest flash
-    { model: "gemini-2.0-flash", version: "v1beta" },      // 2.0 flash fallback
-    { model: "gemini-pro-latest", version: "v1beta" }      // Pro fallback
+    { model: "gemini-1.5-flash", version: "v1beta" },        // Best free tier limits
+    { model: "gemini-1.5-flash-latest", version: "v1beta" }, // Latest 1.5 flash
+    { model: "gemini-flash-latest", version: "v1beta" }      // Generic flash fallback
   ];
 
   for (const strategy of strategies) {
