@@ -21,8 +21,6 @@ export default function ChatWindow() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [matchedTherapistId, setMatchedTherapistId] = useState<string | null>(null);
-  const [patientId] = useState(() => Math.random().toString(36).substring(2, 15));
   const messagesEndRef = useRef<null | HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -33,23 +31,13 @@ export default function ChatWindow() {
     scrollToBottom();
   }, [messages]);
 
-  // ... existing imports ...
 
-  // ... inside ChatWindow component ...
 
-  const sendToHandleChat = async (text: string, currentMessages: Message[], therapistId: string | null) => {
-    // Convert sender to role and text to content
-    const conversationHistory = currentMessages.map(msg => ({
-      role: msg.sender,
-      content: msg.text
-    }));
-
+  const sendToHandleChat = async (text: string) => {
     const { data, error } = await supabase.functions.invoke('handle-chat', {
       body: {
         userMessage: text,
-        conversationHistory: conversationHistory, // Pass the history
-        patientId: patientId,
-        matchedTherapistId: therapistId
+        patientId: "anon-123"
       }
     });
 
@@ -64,59 +52,24 @@ export default function ChatWindow() {
   const handleSend = async () => {
     if (!input.trim()) return;
     const userMsg = input;
-    const newMessages: Message[] = [...messages, { sender: "user", text: userMsg }];
-
     setInput("");
-    setMessages(newMessages);
+    setMessages(prev => [...prev, { sender: "user", text: userMsg }]);
     setLoading(true);
 
     try {
-      // 1. Get AI response and check for next actions
-      const chatData: any = await sendToHandleChat(userMsg, newMessages, matchedTherapistId);
-      const reply = chatData?.message || "I processed that. What's next?";
-      setMessages(prev => [...prev, { sender: "bot", text: reply }]);
+      const data: any = await sendToHandleChat(userMsg);
 
-      // 2. If the next action is to find a therapist, execute it
-      if (chatData?.nextAction === 'find-therapist' && chatData?.inquiryId) {
-        const { data: therapistData, error: therapistError } = await supabase.functions.invoke('find-therapist', {
-          body: { inquiryId: chatData.inquiryId }
-        });
+      // FIX: Use the natural language 'message' from the AI
+      const reply = data?.message || "I processed that, but didn't get a specific response.";
 
-        if (therapistError) throw new Error(therapistError.message);
-
-        const chosen = therapistData?.chosen;
-        let therapistReply = "I'm sorry, I couldn't find a suitable therapist at the moment. Please try again later.";
-
-        if (chosen) {
-          setMatchedTherapistId(chosen.id);
-          therapistReply = `I've found a great match for you: ${chosen.name}.`;
-          const therapist = therapistData.matches[0]?.therapist;
-          if (therapist?.bio) {
-            therapistReply += `\n\nHere's a bit about them: "${therapist.bio}"`;
-          }
-          therapistReply += `\n\nWould you like to book an appointment with ${chosen.name}?`;
-        }
-
-        setMessages(prev => [...prev, { sender: "bot", text: therapistReply }]);
-
-      } else if (chatData?.nextAction === 'book-appointment') {
-        // 3. If the next action is to book, execute it
-        const { data: bookingData, error: bookingError } = await supabase.functions.invoke('book-appointment', {
-          body: { ...chatData } // Pass all data from handle-chat
-        });
-
-        if (bookingError) throw new Error(bookingError.message);
-
-        const confirmationMessage = bookingData?.success
-          ? "Your appointment has been successfully booked! You should receive a calendar invitation shortly."
-          : "There was an issue booking your appointment. Please try again.";
-
-        setMessages(prev => [...prev, { sender: "bot", text: confirmationMessage }]);
-        setMatchedTherapistId(null);
+      // Debugging: Log the extracted data to console to verify it's working
+      if (data?.extractedData) {
+        console.log("AI Extracted:", data.extractedData);
       }
 
+      setMessages(prev => [...prev, { sender: "bot", text: reply }]);
     } catch (err: any) {
-      setMessages(prev => [...prev, { sender: "bot", text: `I apologize, an error occurred: ${err.message}` }]);
+      setMessages(prev => [...prev, { sender: "bot", text: "I apologize, but I'm having trouble connecting right now. Please try again later." }]);
       console.error(err);
     } finally {
       setLoading(false);
