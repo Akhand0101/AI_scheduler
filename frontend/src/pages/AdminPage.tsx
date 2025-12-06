@@ -14,8 +14,10 @@ export default function AdminPage() {
     try {
       const { data, error } = await supabase.functions.invoke('get-admin-data');
       if (error) throw error;
-      if (data && data.length > 0) {
-        setTherapist(data[0]);
+
+      // Update therapist state if returned
+      if (data && data.therapist && data.therapist.length > 0) {
+        setTherapist(data.therapist[0]);
       }
     } catch (error) {
       console.error("Error fetching admin data:", error);

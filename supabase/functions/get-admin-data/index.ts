@@ -43,7 +43,7 @@ Deno.serve(async (req) => {
 
     // 3. Fetch Data
     // We can use Promise.all to fetch both tables in parallel for speed
-    const [inquiriesResponse, appointmentsResponse] = await Promise.all([
+    const [inquiriesResponse, appointmentsResponse, therapistResponse] = await Promise.all([
       supabase
         .from('inquiries')
         .select(`
@@ -58,17 +58,30 @@ Deno.serve(async (req) => {
           *,
           therapists ( name )
         `)
-        .order('start_time', { ascending: false })
+        .order('start_time', { ascending: false }),
+
+      // Fetch the therapist record for the current user to get their ID and calendar status
+      supabase
+        .from('therapists')
+        .select('*')
+        .eq('user_id', user.id)
+        .single()
     ])
 
     if (inquiriesResponse.error) throw inquiriesResponse.error
     if (appointmentsResponse.error) throw appointmentsResponse.error
+    // We don't throw for therapist error because maybe they aren't a therapist yet, 
+    // or the record doesn't exist, which is fine, we just return null.
 
     // 4. Return Combined Data
     return new Response(
       JSON.stringify({
         inquiries: inquiriesResponse.data,
-        appointments: appointmentsResponse.data
+        appointments: appointmentsResponse.data,
+        therapist: therapistResponse.data ? [therapistResponse.data] : [] // Frontend expects array for legacy reasons or just send the object? AdminPage expects data[0] so array is safer if we change frontend logic.
+        // Wait, looking at frontend AdminPage.tsx:18 setTherapist(data[0]); 
+        // AdminPage expects the whole response to be an array? 
+        // Let's re-read the frontend.
       }),
       {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
