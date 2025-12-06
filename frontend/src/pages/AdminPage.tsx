@@ -69,7 +69,7 @@ export default function AdminPage() {
     }
 
     if (!therapist?.id) {
-      alert("Error: Unable to identify therapist. Please refresh the page and try again.");
+      alert("Error: No therapist profile found. Please ensure you are logged in correctly and your account is linked to a therapist profile.");
       return;
     }
 
