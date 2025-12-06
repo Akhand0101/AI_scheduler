@@ -2,7 +2,8 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 
 serve(async (req) => {
   const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
-  const redirectUri = 'https://qhuqwljmphigdvcwwzgg.supabase.co/functions/v1/connect-google' // UPDATE THIS!
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? 'https://qhuqwljmphigdvcwwzgg.supabase.co'
+  const redirectUri = `${supabaseUrl}/functions/v1/google-callback`
   
   // Get the therapist ID from the request URL query params
   const url = new URL(req.url)
