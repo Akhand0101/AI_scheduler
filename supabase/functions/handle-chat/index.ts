@@ -325,52 +325,54 @@ async function generateConversationalResponse(
 
   // Determine what we still need
   const missingInfo: string[] = [];
-  if (!inquiry?.extracted_specialty && extractedData.problem === 'not specified') missingInfo.push("what they'd like help with");
-  if (!inquiry?.requested_schedule && extractedData.schedule === 'not specified') missingInfo.push("their preferred schedule");
-  if (!inquiry?.insurance_info && extractedData.insurance === 'not specified') missingInfo.push("their insurance information");
+  if (!inquiry?.extracted_specialty && extractedData.problem === 'not specified') missingInfo.push("what they're going through");
+  if (!inquiry?.requested_schedule && extractedData.schedule === 'not specified') missingInfo.push("when they're available");
+  if (!inquiry?.insurance_info && extractedData.insurance === 'not specified') missingInfo.push("insurance provider");
 
-  const prompt = `You are an empathetic, warm, and professional therapy scheduling assistant. Your role is to help people find the right therapist in a conversational, human way.
+  const prompt = `You are a warm, empathetic therapy assistant. Your name is "Kai".
+Your goal is to have a NATURAL conversation with the user to help them find a therapist.
+Do NOT treat this as a form to fill out. Treat it as a supportive chat.
 
-Conversation so far:
+Conversation History:
 ${contextMessages}
 
-What we know about the user: ${knownContext || "Just starting the conversation."}
+User's Profile (What we know):
+${knownContext || "No details yet."}
 
-User's current message: "${userMessage}"
+User's Latest Message: "${userMessage}"
 
-Your task:
-1. Respond in a warm, conversational, human way - like a caring friend who understands
-2. Show empathy and validate their feelings if they're sharing something difficult
-3. If we're missing information (${missingInfo.length > 0 ? missingInfo.join(", ") : "nothing - we have everything"}), gently ask for it in a natural way
-4. Keep responses concise but warm (2-3 sentences max)
-5. Don't sound robotic or overly formal
-6. Use casual, friendly language while remaining professional
+Missing details we eventually need: ${missingInfo.length > 0 ? missingInfo.join(", ") : "None - we have everything!"}
 
-${missingInfo.length === 0 ? "Since we have all the information, let them know you're going to find great therapist matches for them." : ""}
+Instructions:
+1. **Be Human First**: Acknowledge what the user just said *before* asking for anything new. If they shared something painful, validate it.
+2. **One Thing at a Time**: If multiple details are missing, DO NOT ask for all of them at once. Pick ONE natural follow-up question.
+   - Example: If you need schedule and insurance, simply ask "What times usually work best for you?" first.
+3. **Flow**: Make the conversation flow naturally. Don't abrupt change topics.
+4. **Style**: concise (1-3 sentences), warm, professional but casual.
+5. **No Lists**: Avoid bullet points or numbered lists unless absolutely necessary.
+6. If the user greets you, greet them back warmly and ask how you can support them today.
+7. If we have ALL info (problem, schedule, insurance), respectfully say you'll look for matches now.
 
-Generate ONLY the assistant's response message (no labels, no JSON, just the natural conversational text):`;
+Generate ONLY the response text.`;
 
-  const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+  const modelsToTry = ['gemini-2.5-flash'];
   for (const modelName of modelsToTry) {
     try {
       console.log(`Generating conversational response with: ${modelName}`);
       const response = await client.models.generateContent({
         model: modelName,
         contents: prompt,
-        config: { temperature: 0.8, maxOutputTokens: 200 }
+        config: { temperature: 0.7, maxOutputTokens: 250 }
       });
       const generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-      return generatedText || "I'm here to help you find the right therapist. Could you tell me what brings you here today?";
+      return generatedText || "I'm listening. Could you tell me a bit more?";
     } catch (error: any) {
       console.warn(`Failed conversation with ${modelName}:`, error.message || error);
     }
   }
 
-  // Fallback if all fail
-  if (missingInfo.length > 0) {
-     return `I'd love to help you find the right therapist. Could you tell me a bit more about ${missingInfo[0]}?`;
-  }
-  return "Thanks for sharing that with me. Let me find some great therapist options for you.";
+  // Fallback if AI fails
+  return "I'm here to support you. Could you share a bit more about what you're looking for?";
 }
 
 async function extractInfoWithGemini(
@@ -439,7 +441,7 @@ Guidelines:
 Format your output strictly as JSON:
 {"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."${therapistSelectionPrompt ? ', "therapist_selection": null or 1-3' : ''}}`;
 
-  const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+  const modelsToTry = ['gemini-2.5-flash'];
   for (const modelName of modelsToTry) {
     try {
       console.log(`Attempting Gemini Request using model: ${modelName}`);
