@@ -455,32 +455,45 @@ function generateFallbackResponse(
   }
   
   // Ask for the first missing piece with context
+  // prioritize empathy if emotional keywords are present in the user message
+  const emotionalKeywords = ['sad', 'grief', 'depressed', 'pain', 'hurt', 'struggling', 'hard', 'hopeless', 'overwhelmed'];
+  const isEmotional = emotionalKeywords.some(k => userMessage.toLowerCase().includes(k));
+
   if (missingInfo.includes("what they're going through")) {
     return pick([
-      "Thank you for reaching out. To ensure we find a therapist who fits your needs, could you share a bit about what's on your mind? (e.g., anxiety, depression, relationship issues)",
-      "I'm here to listen. Could you tell me a little about what you're looking for help with? It helps us find the right specialist.",
-      "We want to make sure you get the best support. Could you share what brings you to therapy today?"
+      "I'm listening. To help us match you with the right therapist, could you share a bit about what you're going through? (e.g., anxiety, grief, relationship issues)",
+      "It sounds like finding support is important right now. Could you tell me a little about what brings you to therapy?",
+      "We want to make sure you feel supported. Could you share what's been weighing on you lately?"
     ]);
   }
   
   if (missingInfo.includes("when they're available")) {
-    const context = inquiry?.extracted_specialty ? `regarding ${inquiry.extracted_specialty}` : "";
+    // If they just shared something emotional, Acknowledge it deeply first
+    if (isEmotional || inquiry?.extracted_specialty) {
+        return pick([
+          "I hear you, and I want to help you find support as soon as possible. When would you be able to meet with someone?",
+          "It sounds like you're carrying a lot. Let's find a time for you to speak with a therapist. When does your schedule allow?",
+          "I'm so sorry you're going through this. To get you connected with care, could you let me know what days or times you might be free?"
+        ]);
+    }
+
+    // Standard schedule request (still polite)
     return pick([
-      `I understand. To schedule a session ${context}, when are you generally available?`,
-      "Thank you. What days or times tend to work best for your schedule?",
-      "Got it. When would be a good time for you to have a session? (e.g. Weekday mornings, specific dates)"
+      "I understand. To get you scheduled, could you let me know what days or times tend to work best for you?",
+      "To help us fit this into your life, when are you generally available for appointments?",
+      "Thanks for sharing that. When would be a good time for you to have a session?"
     ]);
   }
   
   if (missingInfo.includes("insurance provider")) {
     return pick([
-      "Thank you. One last thing - do you plan to use insurance? If so, could you let me know which provider?",
-      "I appreciate that. To check for coverage, could you tell me who your insurance provider is?",
-      "Almost there. Do you have a specific insurance provider you'd like to use?"
+      "Thank you. One last step to get you connected - do you plan to use insurance? If so, which provider?",
+      "I appreciate you sharing that. To check for coverage options, could you tell me who your insurance provider is?",
+      "Almost done. Do you have a specific insurance provider you'd like to use for these sessions?"
     ]);
   }
   
-  return "Thank you for sharing that. To help me find the best-fit therapist for you, could you tell me a little more about what you're looking for?";
+  return "I hear you. To help me find the best-fit therapist for you, could you tell me a little more about what you're looking for?";
 }
 
 async function extractInfoWithGemini(

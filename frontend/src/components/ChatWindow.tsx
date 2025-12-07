@@ -17,7 +17,7 @@ type Message = { sender: "user" | "bot"; text: string };
 
 export default function ChatWindow() {
   const [messages, setMessages] = useState<Message[]>([
-    { sender: "bot", text: "Hi! 👋 I'm Kai, your therapy booking assistant. I'm here to help you find and schedule an appointment with the right therapist. What brings you here today?" }
+    { sender: "bot", text: "Hi, I'm Kai. I'm here to support you in finding a therapist. I know reaching out can be a big step. How can I help you today?" }
   ]);
   // Use a random ID per session for demo purposes, ensuring a fresh conversation on refresh
   const [patientId] = useState(`anon-${Math.random().toString(36).substring(7)}`);
@@ -92,7 +92,7 @@ export default function ChatWindow() {
 
       // --- Orchestration Logic ---
       if (data?.nextAction === 'find-therapist' && data.inquiryId) {
-        setMessages(prev => [...prev, { sender: 'bot', text: "🔍 Let me find some great therapists who match your needs..." }]);
+        setMessages(prev => [...prev, { sender: 'bot', text: "Thank you. I'm looking for therapists who can best support you..." }]);
 
         const { data: findData, error: findError } = await supabase.functions.invoke('find-therapist', {
           body: { inquiryId: data.inquiryId, limit: 3 }
@@ -113,7 +113,7 @@ export default function ChatWindow() {
           setPendingTherapistMatches(therapistOptions);
 
           // Show all matches with details
-          let matchesText = "Perfect! I found some great therapists for you:\n\n";
+          let matchesText = "I've found some thoughtful matches for you:\n\n";
           findData.matches.forEach((match: any, index: number) => {
             const t = match.therapist;
             const specialtiesStr = Array.isArray(t.specialties) ? t.specialties.slice(0, 3).join(", ") : "Multiple areas";
@@ -129,7 +129,7 @@ export default function ChatWindow() {
             matchesText += "\n";
           });
 
-          matchesText += "Which therapist would you like to book with? Just let me know the number (e.g., '1', 'the first one', 'number 2', etc.)";
+          matchesText += "Does one of these stand out to you? Let me know which one you prefer (e.g., '1' or 'the first one').";
 
           setMessages(prev => [...prev, {
             sender: 'bot',
@@ -141,7 +141,7 @@ export default function ChatWindow() {
       }
 
       if (data?.nextAction === 'book-appointment' && data.therapistId && data.startTime) {
-        setMessages(prev => [...prev, { sender: 'bot', text: "📅 Perfect! Let me book that appointment for you..." }]);
+        setMessages(prev => [...prev, { sender: 'bot', text: "Wonderful. I'm securing that time for you..." }]);
 
         const { data: bookData, error: bookError } = await supabase.functions.invoke('book-appointment', {
           body: {
