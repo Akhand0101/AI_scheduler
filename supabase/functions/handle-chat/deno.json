@@ -1,4 +1,9 @@
 {
+  "compilerOptions": {
+    "lib": [
+      "deno.window"
+    ]
+  },
   "imports": {
     "@google/genai": "npm:@google/genai@^0.1.1",
     "@supabase/supabase-js": "jsr:@supabase/supabase-js@2"

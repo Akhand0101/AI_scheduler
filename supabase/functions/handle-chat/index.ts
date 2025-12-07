@@ -403,7 +403,8 @@ Example good response: "I'm really sorry to hear you've been feeling that way. I
 }
 
 /**
- * Generate a helpful response when Gemini API is unavailable
+ * Generate a helpful response when Gemini API is unavailable.
+ * This function prioritizes warmth, empathy, and conversational flow.
  */
 function generateFallbackResponse(
   userMessage: string,
@@ -413,87 +414,133 @@ function generateFallbackResponse(
 ): string {
   // Helpers for variety
   const pick = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
-  
-  // If user just greeted, welcome them
   const lowerMsg = userMessage.toLowerCase();
+  
+  // Determine emotional context from current message OR previous inquiry data
+  const emotionalKeywords = ['sad', 'grief', 'depressed', 'pain', 'hurt', 'struggling', 'hard', 'hopeless', 'overwhelmed', 'anxious', 'scared', 'lost', 'alone', 'crying', 'die', 'death', 'loss'];
+  const isCurrentlyEmotional = emotionalKeywords.some(k => lowerMsg.includes(k));
+  
+  // Check if they shared something emotional earlier (stored in inquiry)
+  const previousSpecialty = inquiry?.extracted_specialty?.toLowerCase() || '';
+  const hasEmotionalHistory = emotionalKeywords.some(k => previousSpecialty.includes(k)) || 
+                              previousSpecialty.includes('grief') || 
+                              previousSpecialty.includes('depression') ||
+                              previousSpecialty.includes('anxiety');
+  
+  const isEmotionalContext = isCurrentlyEmotional || hasEmotionalHistory;
+  
+  // If user just greeted, welcome them warmly
   if (lowerMsg.length < 20 && (lowerMsg.includes('hi') || lowerMsg.includes('hello') || lowerMsg.includes('hey'))) {
     return pick([
-      "Hi, I'm Kai. I'm here to support you in finding a therapist. I know reaching out can be a big step. What brings you here today?",
-      "Hello. I'm Kai, your booking assistant. I'm here to help you find the right support. How can I help you today?",
-      "Hi there. I'm glad you're here. To help me find the best match for you, could you tell me a little about what's bringing you to therapy?"
+      "Hi, I'm Kai. 💙 I'm here to help you find a therapist who truly understands what you're going through. There's no rush—take your time. What's been on your mind lately?",
+      "Hello, I'm Kai. I'm really glad you reached out. Finding the right support is such an important step. What brings you here today?",
+      "Hi there. 🌿 I'm Kai, and I'm here to listen. Reaching out takes courage, and I want to make this as easy as possible for you. What's going on?"
     ]);
   }
   
   // If therapist selection was detected
   if (extractedData.therapist_selection) {
-     return pick([
-       "That's a great choice. I'll get that started for you.",
-       "Understood. I'll make a note of your preference for that therapist.",
-       "Thank you. I'm setting that up for you now."
-     ]);
+    return pick([
+      "That's a wonderful choice. I think they'll be a great fit for you. Let me get that set up.",
+      "I'm glad that one resonated with you. I'll connect you with them now.",
+      "Great choice. I have a good feeling about this match. Setting things up for you now."
+    ]);
   }
   
   // If booking intent detected "yes"
   if (extractedData.booking_intent === 'yes') {
-     return pick([
-       "Wonderful. I'm confirming that appointment for you now.",
-       "Great, I'm securing that time for you. You're all set.",
-       "Perfect. I'm finalizing your booking."
-     ]);
+    return pick([
+      "I'm so glad you're taking this step. Let me confirm that appointment for you right now. 💙",
+      "Wonderful—you're doing something really positive for yourself. I'm securing that time for you.",
+      "That's great. I'm finalizing your booking now. You're going to be in good hands."
+    ]);
   }
   
-  // If all info is collected
-  // If we just collected the last piece, acknowledge it specificially
+  // If all info is collected - acknowledge warmly and transition
   if (missingInfo.length === 0) {
     if (extractedData.insurance && extractedData.insurance !== 'not specified') {
-       return `Thank you. I see you have ${extractedData.insurance}. I'll look for the best matches who accept your insurance.`;
+      if (isEmotionalContext) {
+        return pick([
+          `Thank you for sharing that. I know this hasn't been easy, but you're almost there. Let me find a compassionate therapist who accepts ${extractedData.insurance} and specializes in what you're going through.`,
+          `Got it—${extractedData.insurance}. I'm searching for someone who can really support you through this. One moment. 💙`,
+          `Perfect. I'm going to find the best match for you—someone who understands and can help. Hang tight.`
+        ]);
+      }
+      return pick([
+        `Great, ${extractedData.insurance} works. Let me find the best therapist matches for you right now.`,
+        `Thanks! I'm searching for therapists who accept ${extractedData.insurance} and fit your needs.`,
+        `Got it. Let me find some great options for you.`
+      ]);
     }
     if (extractedData.schedule && extractedData.schedule !== 'not specified') {
-       return "Got it. I've noted your availability. I'll find some therapists that fit your schedule.";
+      return pick([
+        "Perfect, I've noted that. Let me find someone who's available and can really help you.",
+        "That works. I'm searching for a therapist who can see you then and support you well.",
+        "Great. Let me match you with someone available at that time."
+      ]);
     }
-    return "Thank you for sharing that. I have everything I need to find you a great match. Let me look for some therapists for you.";
+    if (isEmotionalContext) {
+      return pick([
+        "Thank you for trusting me with this. I have everything I need. Let me find someone who can truly support you through what you're experiencing. 💙",
+        "I'm going to find you a therapist who specializes in exactly what you're dealing with. You deserve that support.",
+        "You've taken a big step today. Let me find the right person to help you on this journey."
+      ]);
+    }
+    return pick([
+      "I have everything I need. Let me find the best therapist matches for you.",
+      "Perfect! Searching for the right therapist for you now.",
+      "Great—let's get you connected with someone who can help."
+    ]);
   }
   
-  // Ask for the first missing piece with context
-  // prioritize empathy if emotional keywords are present in the user message
-  const emotionalKeywords = ['sad', 'grief', 'depressed', 'pain', 'hurt', 'struggling', 'hard', 'hopeless', 'overwhelmed'];
-  const isEmotional = emotionalKeywords.some(k => userMessage.toLowerCase().includes(k));
+  // --- ASKING FOR MISSING INFO (with emotional context awareness) ---
 
+  // Missing: Problem/concern
   if (missingInfo.includes("what they're going through")) {
     return pick([
-      "I'm listening. To help us match you with the right therapist, could you share a bit about what you're going through? (e.g., anxiety, grief, relationship issues)",
-      "It sounds like finding support is important right now. Could you tell me a little about what brings you to therapy?",
-      "We want to make sure you feel supported. Could you share what's been weighing on you lately?"
+      "I'm here to listen, no judgment at all. Could you share a little about what's been weighing on you? It helps me find the right kind of support for you.",
+      "Take your time. What's been going on that made you want to reach out? I want to make sure I connect you with someone who truly understands.",
+      "I'd love to help you find the right fit. Can you tell me a bit about what you're going through—whether it's stress, sadness, relationships, or something else?"
     ]);
   }
   
+  // Missing: Schedule - this is where the conversation was dying!
   if (missingInfo.includes("when they're available")) {
-    // If they just shared something emotional, Acknowledge it deeply first
-    if (isEmotional || inquiry?.extracted_specialty) {
-        return pick([
-          "I hear you, and I want to help you find support as soon as possible. When would you be able to meet with someone?",
-          "It sounds like you're carrying a lot. Let's find a time for you to speak with a therapist. When does your schedule allow?",
-          "I'm so sorry you're going through this. To get you connected with care, could you let me know what days or times you might be free?"
-        ]);
+    if (isEmotionalContext) {
+      return pick([
+        "I hear you, and I'm so sorry you're carrying this. 💙 Let's get you connected with someone soon. When would work for you to have a session?",
+        "What you're going through sounds really hard. I want to help you find support as quickly as possible. When are you usually free?",
+        "I'm glad you're here. Let's find a time that works for you to speak with someone who can help. Any particular days or times that are best?"
+      ]);
     }
-
-    // Standard schedule request (still polite)
     return pick([
-      "I understand. To get you scheduled, could you let me know what days or times tend to work best for you?",
-      "To help us fit this into your life, when are you generally available for appointments?",
-      "Thanks for sharing that. When would be a good time for you to have a session?"
+      "Thanks for sharing that with me. When would be a good time for you to meet with a therapist?",
+      "I appreciate you opening up. What days or times generally work best for your schedule?",
+      "That's helpful to know. When are you usually available for appointments?"
     ]);
   }
   
+  // Missing: Insurance - CRITICAL: This is where the bot sounded dead before
   if (missingInfo.includes("insurance provider")) {
+    if (isEmotionalContext) {
+      return pick([
+        "You're doing great—just one more thing so I can find you the best match. 💙 Do you have insurance you'd like to use, and if so, which provider?",
+        "Almost there. I want to make sure whoever I match you with can provide affordable care. Do you plan to use insurance? If so, who's your provider?",
+        "We're so close to getting you connected with help. Last question: do you have an insurance provider you'd like to use for therapy? If not, that's totally okay too."
+      ]);
+    }
     return pick([
-      "Thank you. One last step to get you connected - do you plan to use insurance? If so, which provider?",
-      "I appreciate you sharing that. To check for coverage options, could you tell me who your insurance provider is?",
-      "Almost done. Do you have a specific insurance provider you'd like to use for these sessions?"
+      "Great, we're almost done! Do you have insurance you'd like to use? If so, which provider?",
+      "Just one more thing—do you plan to use insurance for your sessions? If so, who's your provider?",
+      "Thanks! Last question: which insurance provider would you like to use, or would you prefer to pay out of pocket?"
     ]);
   }
   
-  return "I hear you. To help me find the best-fit therapist for you, could you tell me a little more about what you're looking for?";
+  // Generic fallback (should rarely hit this)
+  if (isEmotionalContext) {
+    return "I'm here with you. 💙 To help me find the best therapist for you, could you tell me a little more about what you need?";
+  }
+  return "I want to make sure I find the right match for you. Could you tell me a bit more about what you're looking for?";
 }
 
 async function extractInfoWithGemini(
