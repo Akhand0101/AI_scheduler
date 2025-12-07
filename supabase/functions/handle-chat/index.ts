@@ -105,11 +105,21 @@ Deno.serve(async (req) => {
         const selectedTherapist = pendingTherapistMatches[selectedIndex];
         
         // Update inquiry with selected therapist
-        await supabaseClient
+        const { data: updatedInquiry, error: updateError } = await supabaseClient
           .from('inquiries')
           .update({ matched_therapist_id: selectedTherapist.id, status: 'matched' })
-          .eq('id', inquiryId);
+          .eq('id', inquiryId)
+          .select()
+          .single();
 
+        if (updateError) {
+          console.error("Error updating inquiry with selected therapist:", updateError);
+        }
+
+        console.log(`✓ Therapist selected: ${selectedTherapist.name} (ID: ${selectedTherapist.id})`);
+
+        // CRITICAL: Return immediately to avoid falling through to prepareResponse
+        // which would trigger 'find-therapist' again and cause the loop
         return new Response(JSON.stringify({
           success: true,
           nextAction: 'therapist-selected',
@@ -441,9 +451,9 @@ function generateFallbackResponse(
   // If therapist selection was detected
   if (extractedData.therapist_selection) {
     return pick([
-      "That's a wonderful choice. I think they'll be a great fit for you. Let me get that set up.",
-      "I'm glad that one resonated with you. I'll connect you with them now.",
-      "Great choice. I have a good feeling about this match. Setting things up for you now."
+      "Perfect choice! I think they'll be a wonderful fit for you. When would you like to schedule your first session?",
+      "Excellent. I have a really good feeling about this match. What time works best for you?",
+      "Great choice. Let's get you booked with them. When are you typically available?"
     ]);
   }
   
