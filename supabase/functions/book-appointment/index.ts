@@ -43,13 +43,18 @@ Deno.serve(async (req) => {
 
     // Steps 4 & 5: Only run if a refresh token is available
     if (therapist?.google_refresh_token) {
+      console.log(`✓ Refresh token found for therapist ${therapistId}`);
       try {
         // 4. Get Google Access Token
         const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
         const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
         
+        console.log(`Client ID present: ${!!clientId}`);
+        console.log(`Client Secret present: ${!!clientSecret}`);
+        
         if (!clientId || !clientSecret) throw new Error("Google Client ID/Secret missing in secrets.");
 
+        console.log('Exchanging refresh token for access token...');
         const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -62,12 +67,17 @@ Deno.serve(async (req) => {
         })
 
         const tokenData = await tokenResponse.json()
+        console.log(`Token response status: ${tokenResponse.status}`);
+        console.log(`Access token received: ${!!tokenData.access_token}`);
+        
         if (!tokenData.access_token) {
              throw new Error(`Failed to refresh Google access token: ${JSON.stringify(tokenData)}`)
         }
 
         // 5. Create Event on Google Calendar
         const calendarId = therapist.google_calendar_id || 'primary'
+        console.log(`Creating event on calendar: ${calendarId}`);
+        
         const eventBody = {
           summary: `Therapy Session with ${patientName || 'Patient'}`,
           description: `Inquiry ID: ${inquiryId}`,
@@ -92,6 +102,8 @@ Deno.serve(async (req) => {
           },
         }
 
+        console.log(`Event body:`, JSON.stringify(eventBody, null, 2));
+
         const calendarResponse = await fetch(
           `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?sendUpdates=all`,
           {
@@ -104,21 +116,28 @@ Deno.serve(async (req) => {
           }
         )
 
+        console.log(`Calendar API response status: ${calendarResponse.status}`);
+
         // Check HTTP status BEFORE parsing JSON
         if (!calendarResponse.ok) {
             const errorText = await calendarResponse.text();
+            console.error(`Calendar API error: ${errorText}`);
             throw new Error(`Google Calendar API error (${calendarResponse.status}): ${errorText}`)
         }
 
         const eventData = await calendarResponse.json()
+        console.log(`Event created with ID: ${eventData.id}`);
+        
         if (!eventData.id) {
             throw new Error(`Failed to create Google Calendar event: ${JSON.stringify(eventData)}`)
         }
         
         googleCalendarEventId = eventData.id;
+        console.log(`✓ Google Calendar sync successful!`);
 
       } catch (e: any) {
-        console.warn(`Google Calendar integration failed: ${e.message}`);
+        console.error(`❌ Google Calendar integration failed:`, e.message);
+        console.error(`Full error:`, e);
         googleCalendarError = e.message;
       }
     } else {

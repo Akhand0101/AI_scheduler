@@ -12,10 +12,16 @@ serve(async (req) => {
   }
 
   try {
+    console.log(`🔐 Google OAuth Callback - Therapist ID: ${therapistId}`);
+    
     // 1. Exchange Code for Tokens
     const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
     const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
     const supabaseUrl = Deno.env.get('SUPABASE_URL')
+    
+    console.log(`Client ID present: ${!!clientId}`);
+    console.log(`Client Secret present: ${!!clientSecret}`);
+    console.log(`Supabase URL: ${supabaseUrl}`);
     
     if (!supabaseUrl) {
       throw new Error('SUPABASE_URL environment variable not set')
@@ -23,6 +29,7 @@ serve(async (req) => {
     
     const redirectUri = `${supabaseUrl}/functions/v1/google-callback`
 
+    console.log('Exchanging auth code for tokens...');
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -36,11 +43,14 @@ serve(async (req) => {
     })
 
     const tokens = await tokenResponse.json()
+    console.log(`Token response status: ${tokenResponse.status}`);
+    console.log(`Refresh token received: ${!!tokens.refresh_token}`);
     
     if (!tokens.refresh_token) {
       // Note: If you don't get a refresh token, it's usually because 
       // access_type=offline wasn't sent or the user was already authorized.
       // prompt=consent fixes this.
+      console.error('No refresh token in response:', JSON.stringify(tokens));
       throw new Error("No refresh token returned from Google.")
     }
 
@@ -48,15 +58,23 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')! // Use SERVICE ROLE to bypass RLS
     const supabase = createClient(supabaseUrl, supabaseKey)
 
-    const { error: dbError } = await supabase
+    console.log(`Updating therapist ${therapistId} with refresh token...`);
+    const { data, error: dbError } = await supabase
       .from('therapists')
       .update({ 
         google_refresh_token: tokens.refresh_token,
         google_calendar_id: 'primary' // Default to their main calendar
       })
       .eq('id', therapistId)
+      .select()
 
-    if (dbError) throw dbError
+    if (dbError) {
+      console.error('Database update error:', dbError);
+      throw dbError;
+    }
+    
+    console.log(`✅ Refresh token saved successfully for therapist ${therapistId}`);
+    console.log(`Updated rows:`, data);
 
     // 3. Redirect back to your React Admin App
     // 3. Redirect back to your React Admin App

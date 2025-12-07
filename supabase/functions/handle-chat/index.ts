@@ -213,23 +213,32 @@ Deno.serve(async (req) => {
               const currentDay = today.getDay(); // 0 = Sunday, 1 = Monday, etc.
               const targetDay = i;
               
+              console.log(`Parsing day: "${dayName}"`);
+              console.log(`Current day: ${currentDay} (${dayNames[currentDay]})`);
+              console.log(`Target day: ${targetDay} (${dayName})`);
+              
               let daysToAdd = 0;
               
               // Check if "next" is mentioned
               if (schedLower.includes('next')) {
-                // "next monday" = next occurrence after this week
-                daysToAdd = (targetDay + 7 - currentDay) % 7;
-                if (daysToAdd === 0) daysToAdd = 7; // If it's the same day, go to next week
+                // "next thursday" = the upcoming/next occurrence of Thursday
+                // Same as just "thursday" - find the next occurrence
+                daysToAdd = (targetDay - currentDay + 7) % 7;
+                if (daysToAdd === 0) daysToAdd = 7; // If same day, go to next week
+                
+                console.log(`"next ${dayName}": ${daysToAdd} days (next occurrence)`);
               } else if (schedLower.includes('this')) {
                 // "this friday" = this week's friday
                 daysToAdd = (targetDay - currentDay + 7) % 7;
                 if (daysToAdd === 0 && hour < today.getHours()) {
                   daysToAdd = 7; // If passed today, go to next week
                 }
+                console.log(`"this ${dayName}": ${daysToAdd} days`);
               } else {
-                // Just "monday" - assume next occurrence
+                // Just "monday" - assume next occurrence (soonest)
                 daysToAdd = (targetDay - currentDay + 7) % 7;
                 if (daysToAdd === 0) daysToAdd = 7; // If today, assume next week
+                console.log(`Just "${dayName}" (next occurrence): ${daysToAdd} days`);
               }
               
               appointmentDate = new Date();
@@ -259,6 +268,7 @@ Deno.serve(async (req) => {
         // STEP 4: Extract DAY (only if specific month was mentioned or no relative date)
         if (!relativeDayFound) {
           let dayOfMonth = appointmentDate.getDate();
+          let dayExplicitlyMentioned = false;
           
           const numberPattern = /(\d{1,2})/g;
           const allNumbers = [...schedLower.matchAll(numberPattern)];
@@ -267,10 +277,17 @@ Deno.serve(async (req) => {
           const candidateDays = allNumbers
             .map(m => parseInt(m[1], 10))
             .filter(num => {
-              if (timeFound && (num === hour || num === (hour > 12 ? hour - 12 : hour) || num === minute)) {
-                console.log(`  Skipping ${num} - it's part of the time`);
+              // Skip if it's the hour (check both 12-hour and 24-hour format)
+              if (timeFound && (num === hour || num === (hour % 12) || (hour > 12 && num === (hour - 12)))) {
+                console.log(`  Skipping ${num} - it's the hour`);
                 return false;
               }
+              // Skip if it's the minute
+              if (timeFound && num === minute) {
+                console.log(`  Skipping ${num} - it's the minute`);
+                return false;
+              }
+              // Skip if out of valid day range
               if (num < 1 || num > 31) {
                 console.log(`  Skipping ${num} - out of valid day range`);
                 return false;
@@ -280,28 +297,64 @@ Deno.serve(async (req) => {
           
           if (candidateDays.length > 0) {
             dayOfMonth = candidateDays[0];
+            dayExplicitlyMentioned = true;
             console.log(`✓ Using day: ${dayOfMonth}`);
           }
           
           // STEP 5: Construct the final date (only if month specified or day number found)
           if (monthIndex !== -1) {
             appointmentDate = new Date(2025, monthIndex, dayOfMonth);
-          } else if (candidateDays.length > 0) {
+          } else if (dayExplicitlyMentioned) {
+            // User mentioned a specific day number without month
             appointmentDate.setDate(dayOfMonth);
           }
+          // else: keep current date (will check if in past below)
         }
         
         appointmentDate.setHours(hour, minute, 0, 0);
         
-        // If the datetime is in the past (and no specific date was mentioned), move to next occurrence
+        // CRITICAL: Multiple safety checks to ensure future appointment
         const now = new Date();
-        if (!relativeDayFound && monthIndex === -1 && appointmentDate < now) {
-          console.log(`⚠ Datetime ${appointmentDate.toLocaleString()} is in the past, adding 1 day`);
+        console.log(`Current time: ${now.toLocaleString()}`);
+        console.log(`Appointment before checks: ${appointmentDate.toLocaleString()}`);
+        
+        // Check 1: If in the past, move forward
+        if (appointmentDate < now) {
+          console.log(`⚠️ PAST DATE DETECTED: ${appointmentDate.toLocaleString()} < ${now.toLocaleString()}`);
+          
+          // If a specific day was mentioned (like "15th"), advance to next month
+          // Otherwise (just time like "9am"), advance to next day
+          if (!relativeDayFound && monthIndex === -1) {
+            console.log(`→ Only time provided, moving to tomorrow`);
+            appointmentDate.setDate(appointmentDate.getDate() + 1);
+          } else {
+            // Specific date mentioned but it's in the past - try next month/week
+            console.log(`→ Specific date in past, advancing`);
+            if (monthIndex !== -1) {
+              // Add 1 year if specific month/day is past
+              appointmentDate.setFullYear(appointmentDate.getFullYear() + 1);
+            } else if (relativeDayFound) {
+              // For relative days, add 7 days
+              appointmentDate.setDate(appointmentDate.getDate() + 7);
+            } else {
+              // Generic fallback - add 1 day
+              appointmentDate.setDate(appointmentDate.getDate() + 1);
+            }
+          }
+        }
+        
+        // Check 2: ABSOLUTE GUARANTEE - if STILL in past, keep adding days until future
+        let safetyCounter = 0;
+        while (appointmentDate < now && safetyCounter < 365) {
+          console.log(`⚠️ STILL IN PAST after adjustment, adding another day`);
           appointmentDate.setDate(appointmentDate.getDate() + 1);
+          safetyCounter++;
         }
         
         console.log(`✓ Final datetime: ${appointmentDate.toLocaleString()}`);
+        console.log(`✓ Verified future: ${appointmentDate > now ? 'YES' : 'NO'}`);
         console.log("======================");
+        
         
         const pad = (n: number) => n.toString().padStart(2, '0');
         const startTimeStr = `${appointmentDate.getFullYear()}-${pad(appointmentDate.getMonth() + 1)}-${pad(appointmentDate.getDate())}T${pad(appointmentDate.getHours())}:${pad(appointmentDate.getMinutes())}:00`;
@@ -560,6 +613,27 @@ Please know that immediate help is available:
 🆘 **Crisis Text Line**: Text HOME to 741741
 
 I'm here to help connect you with a therapist who can provide ongoing support. To find the best match for you as quickly as possible, could you share a bit about what you're going through? And please, if you're in immediate danger, reach out to 988 right now—they're trained to help.`;
+  }
+  
+  // 🚨 TRAUMA/VIOLENCE DETECTION - Check after crisis
+  const traumaKeywords = ['kill me', 'tried to kill', 'attacked me', 'assault', 'rape', 'raped', 
+                          'abused', 'abuse', 'violence', 'violent', 'threatened', 'hurt me',
+                          'hit me', 'beaten', 'stabbed', 'shot'];
+  const isTrauma = traumaKeywords.some(k => lowerMsg.includes(k));
+  
+  if (isTrauma) {
+    // If they just shared trauma, acknowledge it with deep empathy
+    if (missingInfo.includes("when they're available")) {
+      return pick([
+        "I'm so sorry that happened to you. That's an incredibly traumatic experience, and you didn't deserve any of it. 💙 Your safety and healing matter. I want to get you connected with a trauma-specialized therapist as soon as possible. When would you be able to meet with someone?",
+        "What you've been through is terrible, and I'm really glad you're reaching out for help. That takes incredible strength. Let's find you trauma-informed support urgently. When are you available for a session?",
+        "I hear you, and I'm so sorry you experienced that violence. You deserve safety and healing. Let's prioritize getting you connected with someone who specializes in trauma. When works for you?"
+      ]);
+    }
+    // For other missing info, acknowledge trauma in all responses
+    if (missingInfo.includes("insurance provider")) {
+      return "You're doing incredibly well by reaching out after what you've been through. 💙 One last thing to connect you with trauma-specialized care: do you have an insurance provider? (e.g., Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare)";
+    }
   }
   
   // If user just greeted, welcome them warmly
