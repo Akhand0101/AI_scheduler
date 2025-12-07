@@ -328,9 +328,9 @@ async function generateConversationalResponse(
   if (!inquiry?.requested_schedule && extractedData.schedule === 'not specified') missingInfo.push("when they're available");
   if (!inquiry?.insurance_info && extractedData.insurance === 'not specified') missingInfo.push("insurance provider");
 
-  const systemInstruction = `You are "Kai", a focused therapy booking assistant. Your PRIMARY goal is to help users book an appointment with a therapist.
+  const systemInstruction = `You are "Kai", an empathetic and warm therapy booking assistant. Your goal is to help users find the right therapist while making them feel heard and supported.
 
-BOOKING FUNNEL - Always guide users toward these 3 pieces of info:
+BOOKING FUNNEL - You need to gently collect these 3 pieces of info:
 1. Their problem/concern (anxiety, depression, relationship, etc.)
 2. Their availability/schedule preference
 3. Their insurance provider
@@ -341,13 +341,13 @@ ${knownContext || "No information collected yet."}
 Missing Info: ${missingInfo.length > 0 ? missingInfo.join(", ") : "All info collected! Ready to find therapist."}
 
 RESPONSE RULES:
-1. Be warm but DIRECTIVE - acknowledge their message briefly, then guide to booking
-2. Ask for ONE missing piece at a time - don't let conversation drift off-topic
-3. Keep responses SHORT (2-3 sentences max)
-4. If user goes off-topic, gently redirect: "I hear you. To help you get matched quickly, can you tell me [missing info]?"
-5. Always remind them this is about booking an appointment with a professional
+1. **Empathy First**: ALWAYS validate the user's feelings or situation before asking for business. If they share a struggle, acknowledge it warmly (e.g., "I'm so sorry you're going through that," or "It sounds like you've been carrying a lot.").
+2. **Be Supportive**: Use a caring, non-judgmental tone.
+3. **Gentle Guidance**: After validating, gently guide the user to the next step.
+4. **One Thing at a Time**: Ask for only ONE missing piece of information at a time to avoid overwhelming them.
+5. **Concise but Kind**: Keep responses reasonable in length (3-4 sentences), balancing warmth with efficiency.
 
-Example good response: "Thanks for sharing that. To match you with the right therapist, I need to know your insurance provider. Who's your insurance with?"
+Example good response: "I'm really sorry to hear you've been feeling that way. It takes courage to reach out. To help us find the best support for you, do you have a specific insurance provider you'd like to use?"
 `;
 
   const contents = [
@@ -397,7 +397,90 @@ Example good response: "Thanks for sharing that. To match you with the right the
     }
   }
 
-  return "I'm hearing you, but I'm having a little trouble connecting. Could you say that again?";
+  // Fallback: Generate a helpful response based on what's missing
+  console.warn("All Gemini models failed - using fallback response generation");
+  return generateFallbackResponse(userMessage, inquiry, extractedData, missingInfo);
+}
+
+/**
+ * Generate a helpful response when Gemini API is unavailable
+ */
+function generateFallbackResponse(
+  userMessage: string,
+  inquiry: any,
+  extractedData: ExtractedData,
+  missingInfo: string[]
+): string {
+  // Helpers for variety
+  const pick = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
+  
+  // If user just greeted, welcome them
+  const lowerMsg = userMessage.toLowerCase();
+  if (lowerMsg.length < 20 && (lowerMsg.includes('hi') || lowerMsg.includes('hello') || lowerMsg.includes('hey'))) {
+    return pick([
+      "Hi, I'm Kai. I'm here to support you in finding a therapist. I know reaching out can be a big step. What brings you here today?",
+      "Hello. I'm Kai, your booking assistant. I'm here to help you find the right support. How can I help you today?",
+      "Hi there. I'm glad you're here. To help me find the best match for you, could you tell me a little about what's bringing you to therapy?"
+    ]);
+  }
+  
+  // If therapist selection was detected
+  if (extractedData.therapist_selection) {
+     return pick([
+       "That's a great choice. I'll get that started for you.",
+       "Understood. I'll make a note of your preference for that therapist.",
+       "Thank you. I'm setting that up for you now."
+     ]);
+  }
+  
+  // If booking intent detected "yes"
+  if (extractedData.booking_intent === 'yes') {
+     return pick([
+       "Wonderful. I'm confirming that appointment for you now.",
+       "Great, I'm securing that time for you. You're all set.",
+       "Perfect. I'm finalizing your booking."
+     ]);
+  }
+  
+  // If all info is collected
+  // If we just collected the last piece, acknowledge it specificially
+  if (missingInfo.length === 0) {
+    if (extractedData.insurance && extractedData.insurance !== 'not specified') {
+       return `Thank you. I see you have ${extractedData.insurance}. I'll look for the best matches who accept your insurance.`;
+    }
+    if (extractedData.schedule && extractedData.schedule !== 'not specified') {
+       return "Got it. I've noted your availability. I'll find some therapists that fit your schedule.";
+    }
+    return "Thank you for sharing that. I have everything I need to find you a great match. Let me look for some therapists for you.";
+  }
+  
+  // Ask for the first missing piece with context
+  if (missingInfo.includes("what they're going through")) {
+    return pick([
+      "Thank you for reaching out. To ensure we find a therapist who fits your needs, could you share a bit about what's on your mind? (e.g., anxiety, depression, relationship issues)",
+      "I'm here to listen. Could you tell me a little about what you're looking for help with? It helps us find the right specialist.",
+      "We want to make sure you get the best support. Could you share what brings you to therapy today?"
+    ]);
+  }
+  
+  if (missingInfo.includes("when they're available")) {
+    const context = inquiry?.extracted_specialty ? `regarding ${inquiry.extracted_specialty}` : "";
+    return pick([
+      `I understand. To schedule a session ${context}, when are you generally available?`,
+      "Thank you. What days or times tend to work best for your schedule?",
+      "Got it. When would be a good time for you to have a session? (e.g. Weekday mornings, specific dates)"
+    ]);
+  }
+  
+  if (missingInfo.includes("insurance provider")) {
+    return pick([
+      "Thank you. One last thing - do you plan to use insurance? If so, could you let me know which provider?",
+      "I appreciate that. To check for coverage, could you tell me who your insurance provider is?",
+      "Almost there. Do you have a specific insurance provider you'd like to use?"
+    ]);
+  }
+  
+  return "Thank you for sharing that. To help me find the best-fit therapist for you, could you tell me a little more about what you're looking for?";
 }
 
 async function extractInfoWithGemini(
@@ -521,5 +604,142 @@ Extract JSON:
     }
   }
   
-  throw new Error("All Gemini models failed extraction.");
+  // Fallback: Simple pattern matching when all AI models fail
+  console.warn("All Gemini models failed - using fallback pattern matching");
+  return simpleFallbackExtraction(userMessage, inquiry, pendingTherapistMatches);
+}
+
+/**
+ * Simple fallback extraction when Gemini API is unavailable
+ * Uses basic pattern matching instead of AI
+ */
+function simpleFallbackExtraction(userMessage: string, inquiry?: any, pendingTherapistMatches?: any[]): ExtractedData {
+  const lowerMsg = userMessage.toLowerCase();
+  
+  // Extract problem/condition - including emotional keywords
+  let problem = "not specified";
+  
+  // Map emotional keywords to conditions
+  const emotionalMappings: { [key: string]: string } = {
+    'sad': 'depression',
+    'depressed': 'depression',
+    'down': 'depression',
+    'hopeless': 'depression',
+    'worried': 'anxiety',
+    'anxious': 'anxiety',
+    'nervous': 'anxiety',
+    'stressed': 'stress',
+    'overwhelmed': 'stress',
+    'panic': 'panic',
+    'scared': 'anxiety'
+  };
+  
+  // Check emotional keywords first
+  for (const [keyword, condition] of Object.entries(emotionalMappings)) {
+    if (lowerMsg.includes(keyword)) {
+      problem = condition;
+      break;
+    }
+  }
+  
+  // Then check for explicit condition names (overrides emotional keywords if found)
+  const conditions = ['anxiety', 'depression', 'stress', 'ptsd', 'ocd', 'bipolar', 'trauma', 
+                      'relationship', 'grief', 'addiction', 'eating disorder'];
+  for (const condition of conditions) {
+    if (lowerMsg.includes(condition)) {
+      problem = condition;
+      break;
+    }
+  }
+  
+  // Extract schedule - detect dates, times, months, days
+  let schedule = "not specified";
+  const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+                  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 
+                  'october', 'november', 'december'];
+  const times = ['morning', 'afternoon', 'evening', 'noon', 'midnight', 'night', 'am', 'pm'];
+  
+  const hasDay = days.some(d => lowerMsg.includes(d));
+  const hasMonth = months.some(m => lowerMsg.includes(m));
+  const hasTime = times.some(t => {
+      // Avoid matching "am" in "I am" or "pm" in words
+      if (t === 'am' || t === 'pm') {
+          return new RegExp(`\\b\\d+\\s*${t}\\b`).test(lowerMsg);
+      }
+      return lowerMsg.includes(t);
+  });
+  const hasDateNumber = /\d{1,2}(st|nd|rd|th)?/.test(lowerMsg); // Matches 17th, 15, 3rd, etc.
+  const hasTimeFormat = /\d{1,2}:\d{2}/.test(lowerMsg) || /\d{1,2}\s*(am|pm)/.test(lowerMsg); // 3:30 or 3pm
+  
+  if (hasDay || hasTime || hasMonth || hasDateNumber || hasTimeFormat) {
+    schedule = userMessage; // Use full message if it contains any time/date info
+  }
+  
+  // Extract insurance
+  let insurance = "not specified";
+  const insuranceProviders = ['aetna', 'blue cross', 'bluecross', 'cigna', 'united', 
+                               'humana', 'kaiser', 'anthem'];
+  for (const provider of insuranceProviders) {
+    if (lowerMsg.includes(provider)) {
+      insurance = provider;
+      break;
+    }
+  }
+  
+  // Detect booking intent
+  let booking_intent: "yes" | "no" | "clarification" | "not specified" = "not specified";
+  if (inquiry?.matched_therapist_id) {
+    if (/\b(yes|sure|ok|okay|book|confirm|schedule)\b/.test(lowerMsg)) {
+      booking_intent = "yes";
+    } else if (/\b(no|cancel|not|don't)\b/.test(lowerMsg)) {
+      booking_intent = "no";
+    } else if (/\?/.test(userMessage)) {
+      booking_intent = "clarification";
+    }
+  }
+  
+  // Detect therapist selection (if pendingTherapistMatches provided)
+  let therapist_selection: number | undefined = undefined;
+  
+  if (inquiry && !inquiry.matched_therapist_id && pendingTherapistMatches && pendingTherapistMatches.length > 0) {
+    // Try to extract selection number (1, 2, 3, etc.)
+    const numberMatch = lowerMsg.match(/\b([123])\b|first|second|third|one|two|three/);
+    if (numberMatch) {
+      if (numberMatch[1]) {
+        therapist_selection = parseInt(numberMatch[1], 10);
+      } else if (lowerMsg.includes('first') || lowerMsg.includes('one')) {
+        therapist_selection = 1;
+      } else if (lowerMsg.includes('second') || lowerMsg.includes('two')) {
+        therapist_selection = 2;
+      } else if (lowerMsg.includes('third') || lowerMsg.includes('three')) {
+        therapist_selection = 3;
+      }
+    }
+    
+    // If no number found, try to match therapist name
+    if (!therapist_selection) {
+      for (let i = 0; i < pendingTherapistMatches.length; i++) {
+        const therapist = pendingTherapistMatches[i];
+        const therapistNameLower = therapist.name?.toLowerCase() || '';
+        
+        // Check if user message contains the therapist's name (or significant part of it)
+        if (therapistNameLower && userMessage.toLowerCase().includes(therapistNameLower)) {
+          therapist_selection = i + 1; // Convert 0-indexed to 1-indexed
+          console.log(`Matched therapist by name: ${therapist.name} -> selection ${therapist_selection}`);
+          break;
+        }
+        
+        // Also try matching last name only
+        const nameParts = therapistNameLower.split(' ');
+        if (nameParts.length > 1 && lowerMsg.includes(nameParts[nameParts.length - 1])) {
+          therapist_selection = i + 1;
+          console.log(`Matched therapist by last name: ${nameParts[nameParts.length - 1]} -> selection ${therapist_selection}`);
+          break;
+        }
+      }
+    }
+  }
+  
+  return { problem, schedule, insurance, booking_intent, therapist_selection };
 }
