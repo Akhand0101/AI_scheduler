@@ -117,22 +117,43 @@ Deno.serve(async (req) => {
         }
 
         console.log(`✓ Therapist selected: ${selectedTherapist.name} (ID: ${selectedTherapist.id})`);
-
-        // CRITICAL: Return immediately to avoid falling through to prepareResponse
-        // which would trigger 'find-therapist' again and cause the loop
-        return new Response(JSON.stringify({
-          success: true,
-          nextAction: 'therapist-selected',
-          inquiryId,
-          therapistId: selectedTherapist.id,
-          message: aiResponse,
-          aiResponse: aiResponse
-        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        
+        // Check if we already have schedule - if yes, proceed to booking automatically
+        const hasSchedule = updatedInquiry?.requested_schedule || scheduleToUse;
+        
+        if (hasSchedule) {
+          console.log(`✓ Schedule exists: ${hasSchedule}. Auto-proceeding to booking.`);
+          // Don't return here - let it fall through to booking logic below
+          // Update latestInquiry to include the matched therapist
+          Object.assign(latestInquiry, updatedInquiry);
+        } else {
+          // No schedule yet - return and ask for it
+          console.log('⚠ No schedule found. Asking for schedule.');
+          return new Response(JSON.stringify({
+            success: true,
+            nextAction: 'therapist-selected',
+            inquiryId,
+            therapistId: selectedTherapist.id,
+            message: aiResponse,
+            aiResponse: aiResponse
+          }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
       }
     }
 
     // Handle booking if user confirmed and has matched therapist
-    if (latestInquiry?.matched_therapist_id && extractedData.booking_intent === 'yes') {
+    // OR if therapist is matched and they just provided a schedule (implicit confirmation)
+    const shouldBook = latestInquiry?.matched_therapist_id && 
+                      (extractedData.booking_intent === 'yes' || 
+                       (extractedData.schedule && extractedData.schedule !== 'not specified'));
+    
+    if (shouldBook) {
+      console.log("=== BOOKING LOGIC ===");
+      console.log("Therapist matched:", latestInquiry.matched_therapist_id);
+      console.log("Schedule to use:", scheduleToUse);
+      console.log("Booking intent:", extractedData.booking_intent);
+      console.log("====================");
+      
       if (scheduleToUse) {
         const schedLower = scheduleToUse.toLowerCase();
         console.log("=== PARSING SCHEDULE ===");
@@ -171,53 +192,114 @@ Deno.serve(async (req) => {
           minute = 0;
         }
         
-        // STEP 2: Extract MONTH
-        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
-                           'july', 'august', 'september', 'october', 'november', 'december'];
-        let monthIndex = -1;
+        // STEP 2: Handle relative dates (tomorrow, next monday, etc.) BEFORE extracting month
+        const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        let relativeDayFound = false;
         
-        for (let i = 0; i < monthNames.length; i++) {
-          if (schedLower.includes(monthNames[i]) || schedLower.includes(monthNames[i].substring(0, 3))) {
-            monthIndex = i;
-            console.log(`✓ Found month: ${monthNames[i]} (index ${i})`);
-            break;
+        // Check for "tomorrow"
+        if (schedLower.includes('tomorrow')) {
+          appointmentDate = new Date();
+          appointmentDate.setDate(appointmentDate.getDate() + 1);
+          relativeDayFound = true;
+          console.log(`✓ Found 'tomorrow': ${appointmentDate.toDateString()}`);
+        }
+        
+        // Check for "next [day]" or "this [day]"
+        if (!relativeDayFound) {
+          for (let i = 0; i < dayNames.length; i++) {
+            const dayName = dayNames[i];
+            if (schedLower.includes(dayName)) {
+              const today = new Date();
+              const currentDay = today.getDay(); // 0 = Sunday, 1 = Monday, etc.
+              const targetDay = i;
+              
+              let daysToAdd = 0;
+              
+              // Check if "next" is mentioned
+              if (schedLower.includes('next')) {
+                // "next monday" = next occurrence after this week
+                daysToAdd = (targetDay + 7 - currentDay) % 7;
+                if (daysToAdd === 0) daysToAdd = 7; // If it's the same day, go to next week
+              } else if (schedLower.includes('this')) {
+                // "this friday" = this week's friday
+                daysToAdd = (targetDay - currentDay + 7) % 7;
+                if (daysToAdd === 0 && hour < today.getHours()) {
+                  daysToAdd = 7; // If passed today, go to next week
+                }
+              } else {
+                // Just "monday" - assume next occurrence
+                daysToAdd = (targetDay - currentDay + 7) % 7;
+                if (daysToAdd === 0) daysToAdd = 7; // If today, assume next week
+              }
+              
+              appointmentDate = new Date();
+              appointmentDate.setDate(appointmentDate.getDate() + daysToAdd);
+              relativeDayFound = true;
+              console.log(`✓ Found day '${dayName}' (${schedLower.includes('next') ? 'next' : schedLower.includes('this') ? 'this' : 'next occurrence'}): ${appointmentDate.toDateString()}`);
+              break;
+            }
           }
         }
         
-        // STEP 3: Extract DAY
-        let dayOfMonth = appointmentDate.getDate();
-        
-        const numberPattern = /(\d{1,2})/g;
-        const allNumbers = [...schedLower.matchAll(numberPattern)];
-        console.log(`All numbers found: ${allNumbers.map(m => m[1]).join(', ')}`);
-        
-        const candidateDays = allNumbers
-          .map(m => parseInt(m[1], 10))
-          .filter(num => {
-            if (timeFound && (num === hour || num === (hour > 12 ? hour - 12 : hour) || num === minute)) {
-              console.log(`  Skipping ${num} - it's part of the time`);
-              return false;
+        // STEP 3: Extract MONTH (only if no relative date was found)
+        let monthIndex = -1;
+        if (!relativeDayFound) {
+          const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
+                             'july', 'august', 'september', 'october', 'november', 'december'];
+          
+          for (let i = 0; i < monthNames.length; i++) {
+            if (schedLower.includes(monthNames[i]) || schedLower.includes(monthNames[i].substring(0, 3))) {
+              monthIndex = i;
+              console.log(`✓ Found month: ${monthNames[i]} (index ${i})`);
+              break;
             }
-            if (num < 1 || num > 31) {
-              console.log(`  Skipping ${num} - out of valid day range`);
-              return false;
-            }
-            return true;
-          });
-        
-        if (candidateDays.length > 0) {
-          dayOfMonth = candidateDays[0];
-          console.log(`✓ Using day: ${dayOfMonth}`);
+          }
         }
         
-        // STEP 4: Construct the final date
-        if (monthIndex !== -1) {
-          appointmentDate = new Date(2025, monthIndex, dayOfMonth);
-        } else {
-          appointmentDate.setDate(dayOfMonth);
+        // STEP 4: Extract DAY (only if specific month was mentioned or no relative date)
+        if (!relativeDayFound) {
+          let dayOfMonth = appointmentDate.getDate();
+          
+          const numberPattern = /(\d{1,2})/g;
+          const allNumbers = [...schedLower.matchAll(numberPattern)];
+          console.log(`All numbers found: ${allNumbers.map(m => m[1]).join(', ')}`);
+          
+          const candidateDays = allNumbers
+            .map(m => parseInt(m[1], 10))
+            .filter(num => {
+              if (timeFound && (num === hour || num === (hour > 12 ? hour - 12 : hour) || num === minute)) {
+                console.log(`  Skipping ${num} - it's part of the time`);
+                return false;
+              }
+              if (num < 1 || num > 31) {
+                console.log(`  Skipping ${num} - out of valid day range`);
+                return false;
+              }
+              return true;
+            });
+          
+          if (candidateDays.length > 0) {
+            dayOfMonth = candidateDays[0];
+            console.log(`✓ Using day: ${dayOfMonth}`);
+          }
+          
+          // STEP 5: Construct the final date (only if month specified or day number found)
+          if (monthIndex !== -1) {
+            appointmentDate = new Date(2025, monthIndex, dayOfMonth);
+          } else if (candidateDays.length > 0) {
+            appointmentDate.setDate(dayOfMonth);
+          }
         }
         
         appointmentDate.setHours(hour, minute, 0, 0);
+        
+        // If the datetime is in the past (and no specific date was mentioned), move to next occurrence
+        const now = new Date();
+        if (!relativeDayFound && monthIndex === -1 && appointmentDate < now) {
+          console.log(`⚠ Datetime ${appointmentDate.toLocaleString()} is in the past, adding 1 day`);
+          appointmentDate.setDate(appointmentDate.getDate() + 1);
+        }
+        
         console.log(`✓ Final datetime: ${appointmentDate.toLocaleString()}`);
         console.log("======================");
         
@@ -290,16 +372,38 @@ function prepareResponse(inquiry: any, inquiryId: string, aiResponse?: string): 
   if (!inquiry.requested_schedule) missingInfo.push("schedule");
   if (!inquiry.insurance_info) missingInfo.push("insurance");
 
+  console.log("=== PREPARE RESPONSE DEBUG ===");
+  console.log("Missing info:", missingInfo);
+  console.log("Therapist matched:", inquiry.matched_therapist_id ? "YES" : "NO");
+  console.log("==============================");
+
+  // If all info is collected
   if (missingInfo.length === 0) {
-    return {
-      success: true,
-      nextAction: "find-therapist",
-      inquiryId,
-      message: aiResponse || "Thank you! I have all the information I need. Let me find the best therapist matches for you.",
-      aiResponse: aiResponse
-    };
+    // Check if therapist is already matched
+    if (inquiry.matched_therapist_id) {
+      // Therapist already selected - ask for booking confirmation or await booking
+      console.log("✓ Therapist already matched, awaiting booking confirmation");
+      return {
+        success: true,
+        nextAction: "awaiting-booking-confirmation",
+        inquiryId,
+        message: aiResponse || "Perfect! Would you like me to book this appointment for you?",
+        aiResponse: aiResponse
+      };
+    } else {
+      // No therapist yet - search for matches
+      console.log("✓ All info collected, searching for therapists");
+      return {
+        success: true,
+        nextAction: "find-therapist",
+        inquiryId,
+        message: aiResponse || "Thank you! I have all the information I need. Let me find the best therapist matches for you.",
+        aiResponse: aiResponse
+      };
+    }
   }
 
+  // Still missing info
   return {
     success: true,
     nextAction: "awaiting-info",
@@ -427,7 +531,11 @@ function generateFallbackResponse(
   const lowerMsg = userMessage.toLowerCase();
   
   // Determine emotional context from current message OR previous inquiry data
-  const emotionalKeywords = ['sad', 'grief', 'depressed', 'pain', 'hurt', 'struggling', 'hard', 'hopeless', 'overwhelmed', 'anxious', 'scared', 'lost', 'alone', 'crying', 'die', 'death', 'loss'];
+  const emotionalKeywords = ['sad', 'grief', 'depressed', 'pain', 'hurt', 'struggling', 'hard', 
+                             'hopeless', 'overwhelmed', 'anxious', 'scared', 'lost', 'alone', 
+                             'crying', 'die', 'death', 'loss', 'fail', 'failed', 'failing', 
+                             'mock', 'mocking', 'bully', 'bullying', 'embarrassed', 'ashamed', 
+                             'worthless', 'rejected', 'abandoned'];
   const isCurrentlyEmotional = emotionalKeywords.some(k => lowerMsg.includes(k));
   
   // Check if they shared something emotional earlier (stored in inquiry)
@@ -438,6 +546,21 @@ function generateFallbackResponse(
                               previousSpecialty.includes('anxiety');
   
   const isEmotionalContext = isCurrentlyEmotional || hasEmotionalHistory;
+  
+  // 🚨 CRISIS DETECTION - Must be checked first
+  const crisisKeywords = ['suicide', 'suicidal', 'kill myself', 'end my life', 'want to die', 
+                          'self harm', 'self-harm', 'hurt myself', 'cutting'];
+  const isCrisis = crisisKeywords.some(k => lowerMsg.includes(k));
+  
+  if (isCrisis) {
+    return `I'm really glad you reached out, and I want you to know that what you're feeling matters. Your life matters. 💙
+
+Please know that immediate help is available:
+🆘 **988 Suicide & Crisis Lifeline**: Call or text 988 (24/7, free, confidential)
+🆘 **Crisis Text Line**: Text HOME to 741741
+
+I'm here to help connect you with a therapist who can provide ongoing support. To find the best match for you as quickly as possible, could you share a bit about what you're going through? And please, if you're in immediate danger, reach out to 988 right now—they're trained to help.`;
+  }
   
   // If user just greeted, welcome them warmly
   if (lowerMsg.length < 20 && (lowerMsg.includes('hi') || lowerMsg.includes('hello') || lowerMsg.includes('hey'))) {
@@ -450,11 +573,24 @@ function generateFallbackResponse(
   
   // If therapist selection was detected
   if (extractedData.therapist_selection) {
-    return pick([
-      "Perfect choice! I think they'll be a wonderful fit for you. When would you like to schedule your first session?",
-      "Excellent. I have a really good feeling about this match. What time works best for you?",
-      "Great choice. Let's get you booked with them. When are you typically available?"
-    ]);
+    // Check if we already have schedule info
+    const hasSchedule = inquiry?.requested_schedule || (extractedData.schedule && extractedData.schedule !== 'not specified');
+    
+    if (hasSchedule) {
+      // Schedule already exists - just confirm selection
+      return pick([
+        "Perfect choice! I think they'll be a wonderful fit for you. Let me get that booked for you.",
+        "Excellent. I have a really good feeling about this match. I'll set that up now.",
+        "Great choice. Let me confirm your appointment with them."
+      ]);
+    } else {
+      // No schedule yet - ask for it
+      return pick([
+        "Perfect choice! I think they'll be a wonderful fit for you. When would you like to schedule your first session?",
+        "Excellent. I have a really good feeling about this match. What time works best for you?",
+        "Great choice. Let's get you booked with them. When are you typically available?"
+      ]);
+    }
   }
   
   // If booking intent detected "yes"
@@ -464,6 +600,15 @@ function generateFallbackResponse(
       "Wonderful—you're doing something really positive for yourself. I'm securing that time for you.",
       "That's great. I'm finalizing your booking now. You're going to be in good hands."
     ]);
+  }
+  
+  // NEW: If user just shared emotional details (problem extracted), acknowledge it warmly
+  if (extractedData.problem && extractedData.problem !== 'not specified' && !inquiry?.extracted_specialty) {
+    // This is the first time they shared their problem
+    if (isCurrentlyEmotional) {
+      // Continue asking for missing info but with extra empathy
+      // The logic below will handle this with emotional context
+    }
   }
   
   // If all info is collected - acknowledge warmly and transition
@@ -503,6 +648,23 @@ function generateFallbackResponse(
     ]);
   }
   
+  // --- SPECIAL CASE: User is elaborating on their problem ---
+  // If problem already exists but user is sharing more emotional details, acknowledge it
+  if (inquiry?.extracted_specialty && isCurrentlyEmotional && !extractedData.schedule && !extractedData.insurance) {
+    // User is opening up more about their situation
+    if (lowerMsg.includes('height') || lowerMsg.includes('short') || lowerMsg.includes('tall')|| lowerMsg.includes('appearance') || lowerMsg.includes('looks')) {
+      if (missingInfo.includes("when they're available")) {
+        return pick([
+          "I'm really sorry you're experiencing that. Being judged for how you look is incredibly painful, and you deserve so much better. 💙 Let's find you someone who can help you work through this. When are you usually available for a session?",
+          "That kind of treatment is really hard to deal with, especially when it's about something you can't control. I want to connect you with support. When would be a good time for you?",
+          "I hear you. That sounds really tough, and I'm glad you're reaching out. Let's get you the help you deserve. When works best for your schedule?"
+        ]);
+      }
+    }
+    
+    // Other elaborations (mock, bully, etc.) are already handled in the schedule section below
+  }
+  
   // --- ASKING FOR MISSING INFO (with emotional context awareness) ---
 
   // Missing: Problem/concern
@@ -517,6 +679,14 @@ function generateFallbackResponse(
   // Missing: Schedule - this is where the conversation was dying!
   if (missingInfo.includes("when they're available")) {
     if (isEmotionalContext) {
+      // Check for specific painful keywords to be even more empathetic
+      if (lowerMsg.includes('fail') || lowerMsg.includes('mock') || lowerMsg.includes('bully') || lowerMsg.includes('embarrassed')) {
+        return pick([
+          "I'm really sorry that happened to you. That sounds incredibly painful, especially dealing with others' judgment on top of your own feelings. 💙 Let's get you connected with someone who can help you process this. When would be a good time for a session?",
+          "That must be so hard, carrying that weight and dealing with how others are treating you. You don't deserve that. Let's find you support soon—when are you usually available to talk with someone?",
+          "I hear you, and I want you to know that failing doesn't define you, and how others are treating you says more about them than you. Let's get you the support you deserve. When works for you to meet with a therapist?"
+        ]);
+      }
       return pick([
         "I hear you, and I'm so sorry you're carrying this. 💙 Let's get you connected with someone soon. When would work for you to have a session?",
         "What you're going through sounds really hard. I want to help you find support as quickly as possible. When are you usually free?",
@@ -534,15 +704,15 @@ function generateFallbackResponse(
   if (missingInfo.includes("insurance provider")) {
     if (isEmotionalContext) {
       return pick([
-        "You're doing great—just one more thing so I can find you the best match. 💙 Do you have insurance you'd like to use, and if so, which provider?",
-        "Almost there. I want to make sure whoever I match you with can provide affordable care. Do you plan to use insurance? If so, who's your provider?",
-        "We're so close to getting you connected with help. Last question: do you have an insurance provider you'd like to use for therapy? If not, that's totally okay too."
+        "You're doing great—just one more thing so I can find you the best match. 💙 Do you have insurance you'd like to use? (We work with Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare, and others)",
+        "Almost there. I want to make sure whoever I match you with can provide affordable care. Do you plan to use insurance? Common providers we work with include Aetna, Blue Cross, Cigna, UnitedHealthcare.",
+        "We're so close to getting you connected with help. Last question: do you have an insurance provider? (e.g., Aetna, Blue Cross Blue Shield, Cigna, etc.)"
       ]);
     }
     return pick([
-      "Great, we're almost done! Do you have insurance you'd like to use? If so, which provider?",
-      "Just one more thing—do you plan to use insurance for your sessions? If so, who's your provider?",
-      "Thanks! Last question: which insurance provider would you like to use, or would you prefer to pay out of pocket?"
+      "Great, we're almost done! Which insurance provider do you have? (e.g., Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare, Humana, etc.)",
+      "Just one more thing—which insurance provider would you like to use? We accept Aetna, Blue Cross, Cigna, UnitedHealthcare, and many others.",
+      "Thanks! Last question: which insurance provider do you have? Common ones include Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare."
     ]);
   }
   
@@ -772,31 +942,47 @@ function simpleFallbackExtraction(userMessage: string, inquiry?: any, pendingThe
   // Detect therapist selection (if pendingTherapistMatches provided)
   let therapist_selection: number | undefined = undefined;
   
-  if (inquiry && !inquiry.matched_therapist_id && pendingTherapistMatches && pendingTherapistMatches.length > 0) {
+  console.log("=== THERAPIST SELECTION DEBUG ===");
+  console.log("pendingTherapistMatches:", pendingTherapistMatches ? `Array of ${pendingTherapistMatches.length}` : "null/undefined");
+  console.log("inquiry?.matched_therapist_id:", inquiry?.matched_therapist_id || "none");
+  console.log("User message:", userMessage);
+  
+  // Check if we should be looking for therapist selection
+  // NOTE: We check pendingTherapistMatches first, not inquiry.matched_therapist_id
+  // because the frontend might not have updated the inquiry yet
+  if (pendingTherapistMatches && Array.isArray(pendingTherapistMatches) && pendingTherapistMatches.length > 0) {
+    console.log("Checking for therapist selection...");
+    
     // Try to extract selection number (1, 2, 3, etc.)
     const numberMatch = lowerMsg.match(/\b([123])\b|first|second|third|one|two|three/);
     if (numberMatch) {
       if (numberMatch[1]) {
         therapist_selection = parseInt(numberMatch[1], 10);
+        console.log(`✓ Found number selection: ${therapist_selection}`);
       } else if (lowerMsg.includes('first') || lowerMsg.includes('one')) {
         therapist_selection = 1;
+        console.log(`✓ Found text selection: first/one -> 1`);
       } else if (lowerMsg.includes('second') || lowerMsg.includes('two')) {
         therapist_selection = 2;
+        console.log(`✓ Found text selection: second/two -> 2`);
       } else if (lowerMsg.includes('third') || lowerMsg.includes('three')) {
         therapist_selection = 3;
+        console.log(`✓ Found text selection: third/three -> 3`);
       }
     }
     
     // If no number found, try to match therapist name
     if (!therapist_selection) {
+      console.log(`Trying name matching with ${pendingTherapistMatches.length} therapists...`);
       for (let i = 0; i < pendingTherapistMatches.length; i++) {
         const therapist = pendingTherapistMatches[i];
         const therapistNameLower = therapist.name?.toLowerCase() || '';
+        console.log(`  Checking therapist ${i + 1}: ${therapist.name}`);
         
         // Check if user message contains the therapist's name (or significant part of it)
-        if (therapistNameLower && userMessage.toLowerCase().includes(therapistNameLower)) {
+        if (therapistNameLower && lowerMsg.includes(therapistNameLower)) {
           therapist_selection = i + 1; // Convert 0-indexed to 1-indexed
-          console.log(`Matched therapist by name: ${therapist.name} -> selection ${therapist_selection}`);
+          console.log(`✓ Matched therapist by full name: ${therapist.name} -> selection ${therapist_selection}`);
           break;
         }
         
@@ -804,12 +990,26 @@ function simpleFallbackExtraction(userMessage: string, inquiry?: any, pendingThe
         const nameParts = therapistNameLower.split(' ');
         if (nameParts.length > 1 && lowerMsg.includes(nameParts[nameParts.length - 1])) {
           therapist_selection = i + 1;
-          console.log(`Matched therapist by last name: ${nameParts[nameParts.length - 1]} -> selection ${therapist_selection}`);
+          console.log(`✓ Matched therapist by last name: ${nameParts[nameParts.length - 1]} -> selection ${therapist_selection}`);
+          break;
+        }
+        
+        // Also try matching first name only
+        if (nameParts.length > 0 && lowerMsg.includes(nameParts[0])) {
+          therapist_selection = i + 1;
+          console.log(`✓ Matched therapist by first name: ${nameParts[0]} -> selection ${therapist_selection}`);
           break;
         }
       }
     }
+    
+    if (!therapist_selection) {
+      console.log("⚠ No therapist selection detected");
+    }
+  } else {
+    console.log("Skipping therapist selection check (no pending matches or already matched)");
   }
+  console.log("=================================");
   
   return { problem, schedule, insurance, booking_intent, therapist_selection };
 }
