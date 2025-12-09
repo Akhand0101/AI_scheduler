@@ -765,6 +765,21 @@ async function toolCheckAvailableSlots(
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📅 BOOK APPOINTMENT - The main booking function
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// This function handles the complete appointment booking flow:
+// 1. Validates all inputs (therapist ID, time, inquiry)
+// 2. Resolves therapist ID (handles both UUID and name-based lookups)
+// 3. Validates working hours (9 AM - 5 PM)
+// 4. Prevents double-booking
+// 5. Creates the appointment
+// 6. Updates the inquiry record
+// 7. Returns success with appointment details
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
 async function toolBookAppointment(
   supabase: any,
   args: any,
@@ -773,189 +788,323 @@ async function toolBookAppointment(
 ) {
   let { therapistId, startTime, endTime, problem } = args;
 
-  // DETAILED LOGGING FOR DEBUGGING
-  console.log("=== BOOKING ATTEMPT ===");
-  console.log("Args received:", JSON.stringify(args));
-  console.log("Therapist ID:", therapistId);
-  console.log("Start Time:", startTime);
-  console.log("End Time:", endTime);
-  console.log("Inquiry:", inquiry?.id);
+  console.log("═══════════════════════════════════════════════════");
+  console.log("📅 BOOKING APPOINTMENT");
+  console.log("═══════════════════════════════════════════════════");
+  console.log(
+    "Input:",
+    JSON.stringify({ therapistId, startTime, endTime, problem }),
+  );
 
-  // Validate required fields
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 1: Basic input validation
+  // ─────────────────────────────────────────────────────────────────────────────
+
   if (!therapistId) {
-    console.error("ERROR: Missing therapistId");
-    return { success: false, error: "Missing therapist ID" };
+    return {
+      success: false,
+      error:
+        "I need to know which therapist you'd like to book with. Could you select one from the list?",
+    };
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // UUID VALIDATION - Handle case where AI passes name instead of UUID
-  // ═══════════════════════════════════════════════════════════════════════════
+  if (!startTime) {
+    return {
+      success: false,
+      error:
+        "I need a time for the appointment. When would you like to schedule?",
+    };
+  }
+
+  if (!inquiry?.id) {
+    console.error("ERROR: Missing inquiry context");
+    return {
+      success: false,
+      error: "Session error - please refresh and try again.",
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 2: Resolve therapist ID (handle name-based lookups)
+  // ─────────────────────────────────────────────────────────────────────────────
+
   const uuidRegex =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let therapistName = "";
 
   if (!uuidRegex.test(therapistId)) {
-    console.warn("⚠️ Therapist ID is not a valid UUID:", therapistId);
-    console.log("Attempting to find therapist by name...");
+    console.log("🔍 Therapist ID is not a UUID, searching by name...");
 
-    // Try to extract a name from the slug (e.g., "claudia-hernandez-lcpc" -> "claudia hernandez")
-    const possibleName = therapistId
+    // Extract name from slug or use as-is
+    const searchTerm = therapistId
       .replace(/-/g, " ")
-      .replace(/\b(lcpc|lcsw|lpc|lsw|phd|md|psyd)\b/gi, "")
-      .trim();
+      .replace(/\b(lcpc|lcsw|lpc|lsw|phd|md|psyd|therapist)\b/gi, "")
+      .trim()
+      .toLowerCase();
 
-    console.log("Looking up therapist with name:", possibleName);
-
-    // Search for the therapist
     const { data: therapists } = await supabase
       .from("therapists")
       .select("id, name")
       .eq("is_active", true);
 
-    if (therapists && therapists.length > 0) {
-      // Try to find a matching therapist
-      const match = therapists.find((t: any) => {
-        const tName = t.name.toLowerCase();
-        const searchName = possibleName.toLowerCase();
-        return tName.includes(searchName) ||
-          searchName.includes(tName.split(" ")[0]);
-      });
+    if (!therapists || therapists.length === 0) {
+      return {
+        success: false,
+        error: "No therapists are currently available. Please try again later.",
+      };
+    }
 
-      if (match) {
-        console.log(
-          "✅ Found matching therapist:",
-          match.name,
-          "with ID:",
-          match.id,
-        );
-        therapistId = match.id; // Use the real UUID
-      } else {
-        console.error(
-          "ERROR: Could not find therapist matching:",
-          possibleName,
-        );
-        return {
-          success: false,
-          error:
-            `I couldn't find a therapist with that name. Please try selecting from the list again.`,
-        };
-      }
+    // Find best match
+    const match = therapists.find((t: any) => {
+      const name = t.name.toLowerCase();
+      const firstName = name.split(" ")[0];
+      const lastName = name.split(" ").slice(-1)[0].replace(/,.*/, ""); // Handle "Name, LCPC"
+
+      return name.includes(searchTerm) ||
+        searchTerm.includes(firstName) ||
+        searchTerm.includes(lastName) ||
+        firstName === searchTerm.split(" ")[0];
+    });
+
+    if (match) {
+      console.log("✅ Found therapist:", match.name, "→", match.id);
+      therapistId = match.id;
+      therapistName = match.name;
     } else {
-      console.error("ERROR: No therapists found in database");
-      return { success: false, error: "No therapists available" };
+      console.error("❌ No therapist found for:", searchTerm);
+      return {
+        success: false,
+        error:
+          `I couldn't find "${searchTerm}" in our system. Would you like to see the list of available therapists?`,
+      };
+    }
+  } else {
+    // Valid UUID - fetch therapist name
+    const { data: therapist } = await supabase
+      .from("therapists")
+      .select("name")
+      .eq("id", therapistId)
+      .single();
+
+    if (therapist) {
+      therapistName = therapist.name;
     }
   }
 
-  if (!startTime) {
-    console.error("ERROR: Missing startTime");
-    return { success: false, error: "Missing start time" };
-  }
-  if (!endTime) {
-    console.error("ERROR: Missing endTime - will calculate");
-    // Calculate end time if not provided (1 hour default)
-  }
-  if (!inquiry?.id) {
-    console.error("ERROR: Missing inquiry");
-    return { success: false, error: "Missing inquiry - session error" };
-  }
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 3: Parse and validate appointment time
+  // ─────────────────────────────────────────────────────────────────────────────
 
-  // Validate time
   const start = new Date(startTime);
   const now = new Date();
 
-  console.log("Parsed start time:", start.toISOString());
-  console.log("Current time:", now.toISOString());
-
+  // Invalid date format
   if (isNaN(start.getTime())) {
-    console.error("ERROR: Invalid start time format");
-    return { success: false, error: "Invalid time format" };
+    return {
+      success: false,
+      error:
+        "I couldn't understand that time. Could you try again? For example: 'tomorrow at 2pm' or '10:00 AM'",
+    };
   }
 
+  // Can't book in the past
   if (start < now) {
-    console.error("ERROR: Time is in the past");
-    return { success: false, error: "Can't book appointments in the past" };
+    return {
+      success: false,
+      error:
+        "That time has already passed. Would you like to book for a later time today or another day?",
+    };
   }
 
-  // Calculate end time if not provided
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 4: Working hours validation (9 AM - 5 PM)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  const hour = start.getHours();
+  const dayOfWeek = start.getDay(); // 0 = Sunday, 6 = Saturday
+
+  // Weekend check
+  if (dayOfWeek === 0 || dayOfWeek === 6) {
+    return {
+      success: false,
+      error:
+        "We're closed on weekends. Would you like to book for Monday or another weekday?",
+    };
+  }
+
+  // Before opening hours (9 AM)
+  if (hour < 9) {
+    return {
+      success: false,
+      error:
+        "Our earliest appointments are at 9 AM. Would you like to book for 9 AM instead?",
+    };
+  }
+
+  // After closing hours (5 PM is the last slot start, 6 PM is closing)
+  if (hour >= 17) {
+    return {
+      success: false,
+      error:
+        "Our last appointments are at 4 PM. Would you like to book for 4 PM or try another day?",
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 5: Calculate end time (1 hour sessions by default)
+  // ─────────────────────────────────────────────────────────────────────────────
+
   const end = endTime
     ? new Date(endTime)
     : new Date(start.getTime() + 60 * 60 * 1000);
-  const endTimeStr = endTime || end.toISOString();
+  const startTimeISO = start.toISOString();
+  const endTimeISO = end.toISOString();
 
-  // Check availability (double-booking prevention)
-  console.log("Checking for conflicts...");
+  // Ensure session doesn't go past 6 PM
+  if (end.getHours() > 18 || (end.getHours() === 18 && end.getMinutes() > 0)) {
+    return {
+      success: false,
+      error:
+        "That session would run past our closing time (5 PM). Would you like an earlier time slot?",
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 6: Double-booking prevention
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  console.log("🔍 Checking for scheduling conflicts...");
+
   const { data: conflicts, error: conflictError } = await supabase
     .from("appointments")
-    .select("id")
+    .select("id, start_time")
     .eq("therapist_id", therapistId)
-    .lt("start_time", endTimeStr)
-    .gt("end_time", startTime);
+    .neq("status", "cancelled")
+    .lt("start_time", endTimeISO)
+    .gt("end_time", startTimeISO);
 
   if (conflictError) {
-    console.error("Conflict check error:", conflictError);
+    console.error("Conflict check failed:", conflictError);
+    // Continue anyway - better to attempt booking than fail silently
   }
 
   if (conflicts && conflicts.length > 0) {
-    console.error("ERROR: Time slot has conflicts:", conflicts);
-    return { success: false, error: "Time slot is already booked" };
+    console.log("❌ Conflict detected:", conflicts);
+    return {
+      success: false,
+      error: `That time slot is already booked. Would you like me to show you ${
+        therapistName || "the therapist"
+      }'s available times?`,
+    };
   }
 
-  console.log("No conflicts found, proceeding to book...");
+  console.log("✅ No conflicts found!");
 
-  // Create appointment
-  const insertData = {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 7: Create the appointment
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  const appointmentData = {
     inquiry_id: inquiry.id,
     therapist_id: therapistId,
-    start_time: startTime,
-    end_time: endTimeStr,
+    start_time: startTimeISO,
+    end_time: endTimeISO,
     status: "scheduled",
   };
-  console.log("Inserting:", JSON.stringify(insertData));
 
-  const { data: appointment, error } = await supabase
+  console.log("📝 Creating appointment:", appointmentData);
+
+  const { data: appointment, error: bookingError } = await supabase
     .from("appointments")
-    .insert(insertData)
+    .insert(appointmentData)
     .select(`
       id,
       start_time,
       end_time,
-      therapists (id, name)
+      status,
+      therapists (id, name, google_refresh_token)
     `)
     .single();
 
-  if (error) {
-    console.error("=== BOOKING FAILED ===");
-    console.error("Error code:", error.code);
-    console.error("Error message:", error.message);
-    console.error("Error details:", error.details);
-    console.error("Full error:", JSON.stringify(error));
-    return { success: false, error: `Failed to book: ${error.message}` };
+  if (bookingError) {
+    console.error("❌ Booking failed:", bookingError);
+
+    // Provide helpful error messages based on error type
+    if (bookingError.code === "23503") {
+      return {
+        success: false,
+        error: "Session error - please refresh and try again.",
+      };
+    }
+    if (bookingError.code === "23505") {
+      return {
+        success: false,
+        error: "This slot was just taken. Would you like to try another time?",
+      };
+    }
+
+    return {
+      success: false,
+      error: "Something went wrong while booking. Please try again.",
+    };
   }
 
-  console.log("=== BOOKING SUCCESS ===");
-  console.log("Appointment created:", appointment?.id);
+  console.log("═══════════════════════════════════════════════════");
+  console.log("✅ BOOKING SUCCESSFUL!");
+  console.log("═══════════════════════════════════════════════════");
+  console.log("Appointment ID:", appointment.id);
+  console.log("Therapist:", appointment.therapists?.name);
+  console.log("Time:", appointment.start_time, "-", appointment.end_time);
 
-  // Update inquiry (DB schema: problem_description, extracted_specialty, matched_therapist_id, status)
-  if (problem) {
-    await supabase
-      .from("inquiries")
-      .update({
-        extracted_specialty: problem,
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 8: Update inquiry record
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  await supabase
+    .from("inquiries")
+    .update({
+      matched_therapist_id: therapistId,
+      status: "scheduled",
+      ...(problem && {
         problem_description: problem,
-        matched_therapist_id: therapistId,
-        status: "scheduled",
-      })
-      .eq("id", inquiry.id);
-  }
+        extracted_specialty: problem,
+      }),
+    })
+    .eq("id", inquiry.id);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 9: Format and return success response
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  const formattedDate = start.toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+
+  const formattedTime = start.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
 
   return {
     success: true,
-    message: "Appointment booked successfully!",
+    message: `Appointment booked successfully!`,
     appointment: {
       id: appointment.id,
-      therapistName: appointment.therapists?.name,
+      therapistId: therapistId,
+      therapistName: appointment.therapists?.name || therapistName,
       startTime: appointment.start_time,
       endTime: appointment.end_time,
+      formattedDate: formattedDate,
+      formattedTime: formattedTime,
+      status: appointment.status,
     },
+    // Additional data for the AI to include in response
+    confirmationMessage: `Your appointment with ${
+      appointment.therapists?.name || therapistName
+    } is confirmed for ${formattedDate} at ${formattedTime}.`,
   };
 }
 
