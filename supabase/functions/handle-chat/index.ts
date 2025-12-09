@@ -156,6 +156,94 @@ const TOOLS = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 🔍 THERAPIST ID RESOLVER - Converts name/slug to UUID
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The AI sometimes passes therapist names or slugs instead of UUIDs.
+// This helper function handles all cases:
+// - Valid UUID: returns as-is
+// - Slug like "claudia-hernandez": extracts name and looks up in DB
+// - Partial name like "claudia": fuzzy matches against therapist list
+//
+async function resolveTherapistId(
+  supabase: any,
+  inputId: string,
+): Promise<{ id: string | null; name: string; error?: string }> {
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  // Already a valid UUID
+  if (uuidRegex.test(inputId)) {
+    const { data: therapist } = await supabase
+      .from("therapists")
+      .select("id, name")
+      .eq("id", inputId)
+      .single();
+
+    return therapist
+      ? { id: therapist.id, name: therapist.name }
+      : { id: null, name: "", error: "Therapist not found" };
+  }
+
+  // Not a UUID - need to look up by name
+  console.log("🔍 Resolving therapist from:", inputId);
+
+  // Extract name from slug (e.g., "claudia-hernandez-lcpc" → "claudia hernandez")
+  const searchTerm = inputId
+    .replace(/-/g, " ")
+    .replace(/\b(lcpc|lcsw|lpc|lsw|phd|md|psyd|therapist)\b/gi, "")
+    .trim()
+    .toLowerCase();
+
+  // Get all therapists
+  const { data: therapists } = await supabase
+    .from("therapists")
+    .select("id, name")
+    .eq("is_active", true);
+
+  if (!therapists || therapists.length === 0) {
+    return { id: null, name: "", error: "No therapists available" };
+  }
+
+  // Find best match using multiple strategies
+  const match = therapists.find((t: any) => {
+    const fullName = t.name.toLowerCase();
+    const nameParts = fullName.split(/[\s,]+/);
+    const firstName = nameParts[0];
+    const lastName = nameParts.length > 1 ? nameParts[1] : "";
+
+    // Strategy 1: Full name contains search term
+    if (fullName.includes(searchTerm)) return true;
+
+    // Strategy 2: Search term contains first name
+    if (searchTerm.includes(firstName)) return true;
+
+    // Strategy 3: Search term contains last name
+    if (lastName && searchTerm.includes(lastName)) return true;
+
+    // Strategy 4: First name matches first word of search
+    if (firstName === searchTerm.split(" ")[0]) return true;
+
+    // Strategy 5: Last name matches any word in search
+    if (lastName && searchTerm.split(" ").includes(lastName)) return true;
+
+    return false;
+  });
+
+  if (match) {
+    console.log("✅ Resolved therapist:", match.name, "→", match.id);
+    return { id: match.id, name: match.name };
+  }
+
+  console.error("❌ Could not resolve therapist from:", inputId);
+  return {
+    id: null,
+    name: "",
+    error: `Couldn't find therapist: ${searchTerm}`,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // KAI'S PERSONALITY & SYSTEM PROMPT
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -686,57 +774,25 @@ async function toolCheckAvailableSlots(
   args: any,
   timeZone: string,
 ) {
-  let { therapistId, date } = args;
+  const { therapistId: inputId, date } = args;
 
   console.log("=== CHECK AVAILABILITY ===");
-  console.log("Therapist ID:", therapistId);
+  console.log("Input ID:", inputId);
   console.log("Date:", date);
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // UUID VALIDATION - Handle case where AI passes name instead of UUID
-  // ═══════════════════════════════════════════════════════════════════════════
-  const uuidRegex =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  // Resolve therapist ID (handles UUIDs, names, and slugs)
+  const resolved = await resolveTherapistId(supabase, inputId);
 
-  if (!uuidRegex.test(therapistId)) {
-    console.warn("⚠️ Therapist ID is not a valid UUID:", therapistId);
-
-    // Try to extract a name from the slug
-    const possibleName = therapistId
-      .replace(/-/g, " ")
-      .replace(/\b(lcpc|lcsw|lpc|lsw|phd|md|psyd)\b/gi, "")
-      .trim();
-
-    // Search for the therapist
-    const { data: therapists } = await supabase
-      .from("therapists")
-      .select("id, name")
-      .eq("is_active", true);
-
-    if (therapists && therapists.length > 0) {
-      const match = therapists.find((t: any) => {
-        const tName = t.name.toLowerCase();
-        const searchName = possibleName.toLowerCase();
-        return tName.includes(searchName) ||
-          searchName.includes(tName.split(" ")[0]);
-      });
-
-      if (match) {
-        console.log(
-          "✅ Found matching therapist:",
-          match.name,
-          "with ID:",
-          match.id,
-        );
-        therapistId = match.id;
-      } else {
-        return {
-          error: `Couldn't find therapist: ${possibleName}`,
-          availableSlots: [],
-        };
-      }
-    }
+  if (!resolved.id) {
+    return {
+      error: resolved.error || "Couldn't find that therapist",
+      availableSlots: [],
+    };
   }
+
+  const therapistId = resolved.id;
+  const therapistName = resolved.name;
+  console.log("Resolved to:", therapistName, "→", therapistId);
 
   // Parse date
   let targetDate = parseFlexibleDate(date);
