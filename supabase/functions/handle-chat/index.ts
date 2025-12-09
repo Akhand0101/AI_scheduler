@@ -649,11 +649,57 @@ async function toolCheckAvailableSlots(
   args: any,
   timeZone: string,
 ) {
-  const { therapistId, date } = args;
+  let { therapistId, date } = args;
 
   console.log("=== CHECK AVAILABILITY ===");
   console.log("Therapist ID:", therapistId);
   console.log("Date:", date);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UUID VALIDATION - Handle case where AI passes name instead of UUID
+  // ═══════════════════════════════════════════════════════════════════════════
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  if (!uuidRegex.test(therapistId)) {
+    console.warn("⚠️ Therapist ID is not a valid UUID:", therapistId);
+
+    // Try to extract a name from the slug
+    const possibleName = therapistId
+      .replace(/-/g, " ")
+      .replace(/\b(lcpc|lcsw|lpc|lsw|phd|md|psyd)\b/gi, "")
+      .trim();
+
+    // Search for the therapist
+    const { data: therapists } = await supabase
+      .from("therapists")
+      .select("id, name")
+      .eq("is_active", true);
+
+    if (therapists && therapists.length > 0) {
+      const match = therapists.find((t: any) => {
+        const tName = t.name.toLowerCase();
+        const searchName = possibleName.toLowerCase();
+        return tName.includes(searchName) ||
+          searchName.includes(tName.split(" ")[0]);
+      });
+
+      if (match) {
+        console.log(
+          "✅ Found matching therapist:",
+          match.name,
+          "with ID:",
+          match.id,
+        );
+        therapistId = match.id;
+      } else {
+        return {
+          error: `Couldn't find therapist: ${possibleName}`,
+          availableSlots: [],
+        };
+      }
+    }
+  }
 
   // Parse date
   let targetDate = parseFlexibleDate(date);
@@ -725,7 +771,7 @@ async function toolBookAppointment(
   inquiry: any,
   authHeader: string,
 ) {
-  const { therapistId, startTime, endTime, problem } = args;
+  let { therapistId, startTime, endTime, problem } = args;
 
   // DETAILED LOGGING FOR DEBUGGING
   console.log("=== BOOKING ATTEMPT ===");
@@ -740,6 +786,65 @@ async function toolBookAppointment(
     console.error("ERROR: Missing therapistId");
     return { success: false, error: "Missing therapist ID" };
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // UUID VALIDATION - Handle case where AI passes name instead of UUID
+  // ═══════════════════════════════════════════════════════════════════════════
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  if (!uuidRegex.test(therapistId)) {
+    console.warn("⚠️ Therapist ID is not a valid UUID:", therapistId);
+    console.log("Attempting to find therapist by name...");
+
+    // Try to extract a name from the slug (e.g., "claudia-hernandez-lcpc" -> "claudia hernandez")
+    const possibleName = therapistId
+      .replace(/-/g, " ")
+      .replace(/\b(lcpc|lcsw|lpc|lsw|phd|md|psyd)\b/gi, "")
+      .trim();
+
+    console.log("Looking up therapist with name:", possibleName);
+
+    // Search for the therapist
+    const { data: therapists } = await supabase
+      .from("therapists")
+      .select("id, name")
+      .eq("is_active", true);
+
+    if (therapists && therapists.length > 0) {
+      // Try to find a matching therapist
+      const match = therapists.find((t: any) => {
+        const tName = t.name.toLowerCase();
+        const searchName = possibleName.toLowerCase();
+        return tName.includes(searchName) ||
+          searchName.includes(tName.split(" ")[0]);
+      });
+
+      if (match) {
+        console.log(
+          "✅ Found matching therapist:",
+          match.name,
+          "with ID:",
+          match.id,
+        );
+        therapistId = match.id; // Use the real UUID
+      } else {
+        console.error(
+          "ERROR: Could not find therapist matching:",
+          possibleName,
+        );
+        return {
+          success: false,
+          error:
+            `I couldn't find a therapist with that name. Please try selecting from the list again.`,
+        };
+      }
+    } else {
+      console.error("ERROR: No therapists found in database");
+      return { success: false, error: "No therapists available" };
+    }
+  }
+
   if (!startTime) {
     console.error("ERROR: Missing startTime");
     return { success: false, error: "Missing start time" };
