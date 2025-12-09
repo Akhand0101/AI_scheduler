@@ -465,7 +465,7 @@ async function aiConversation({
   let finalResponse = "";
   let bookingResult: any = null;
   let appointmentData: any = null;
-  let lastToolResults: any[] = []; // Track tool results for fallback
+  const lastToolResults: any[] = []; // Track tool results for fallback
 
   // Allow up to 4 turns: enough for tool call -> response -> tool call -> response
   const MAX_TURNS = 4;
@@ -1150,7 +1150,113 @@ async function toolBookAppointment(
   console.log("Time:", appointment.start_time, "-", appointment.end_time);
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // STEP 8: Update inquiry record
+  // STEP 8: Sync to Google Calendar (if admin has connected calendar)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  let googleCalendarEventId: string | null = null;
+  let googleCalendarError: string | null = null;
+
+  // Find admin calendar (any therapist with a connected Google refresh token)
+  const { data: adminTherapist } = await supabase
+    .from("therapists")
+    .select("id, name, google_refresh_token, google_calendar_id")
+    .not("google_refresh_token", "is", null)
+    .limit(1)
+    .single();
+
+  if (adminTherapist?.google_refresh_token) {
+    console.log("📅 Syncing to Google Calendar...");
+
+    try {
+      const clientId = Deno.env.get("GOOGLE_CLIENT_ID");
+      const clientSecret = Deno.env.get("GOOGLE_CLIENT_SECRET");
+
+      if (!clientId || !clientSecret) {
+        console.warn("⚠️ Google OAuth credentials not configured");
+        googleCalendarError = "Calendar sync not configured";
+      } else {
+        // Get fresh access token
+        const tokenResponse = await fetch(
+          "https://oauth2.googleapis.com/token",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: clientId,
+              client_secret: clientSecret,
+              refresh_token: adminTherapist.google_refresh_token,
+              grant_type: "refresh_token",
+            }),
+          },
+        );
+
+        const tokenData = await tokenResponse.json();
+
+        if (tokenData.access_token) {
+          const calendarId = adminTherapist.google_calendar_id || "primary";
+
+          // Create calendar event
+          const eventBody = {
+            summary: `Therapy Session with ${therapistName}`,
+            description:
+              `Appointment ID: ${appointment.id}\nTherapist: ${therapistName}\n\nBooked via Kai chatbot`,
+            start: {
+              dateTime: startTimeISO,
+              timeZone: "Asia/Kolkata",
+            },
+            end: {
+              dateTime: endTimeISO,
+              timeZone: "Asia/Kolkata",
+            },
+          };
+
+          const calendarResponse = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${tokenData.access_token}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(eventBody),
+            },
+          );
+
+          if (calendarResponse.ok) {
+            const eventData = await calendarResponse.json();
+            googleCalendarEventId = eventData.id;
+            console.log(
+              "✅ Google Calendar sync SUCCESS! Event ID:",
+              googleCalendarEventId,
+            );
+
+            // Save the Google Calendar event ID to the appointment
+            await supabase
+              .from("appointments")
+              .update({ google_calendar_event_id: googleCalendarEventId })
+              .eq("id", appointment.id);
+          } else {
+            const errorText = await calendarResponse.text();
+            console.error("❌ Calendar sync failed:", errorText);
+            googleCalendarError = "Failed to sync to calendar";
+          }
+        } else {
+          console.error("❌ Failed to get access token:", tokenData);
+          googleCalendarError = "Calendar authentication failed";
+        }
+      }
+    } catch (e: any) {
+      console.error("❌ Calendar sync error:", e.message);
+      googleCalendarError = e.message;
+    }
+  } else {
+    console.log(
+      "ℹ️ No admin calendar connected - skipping Google Calendar sync",
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // STEP 9: Update inquiry record
   // ─────────────────────────────────────────────────────────────────────────────
 
   await supabase
@@ -1193,11 +1299,16 @@ async function toolBookAppointment(
       formattedDate: formattedDate,
       formattedTime: formattedTime,
       status: appointment.status,
+      googleCalendarEventId: googleCalendarEventId,
     },
+    calendarSynced: !!googleCalendarEventId,
+    calendarError: googleCalendarError,
     // Additional data for the AI to include in response
     confirmationMessage: `Your appointment with ${
       appointment.therapists?.name || therapistName
-    } is confirmed for ${formattedDate} at ${formattedTime}.`,
+    } is confirmed for ${formattedDate} at ${formattedTime}.${
+      googleCalendarEventId ? " It's been added to the calendar!" : ""
+    }`,
   };
 }
 
