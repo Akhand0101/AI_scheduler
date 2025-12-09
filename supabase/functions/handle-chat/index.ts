@@ -1,1089 +1,1482 @@
-// Setup type definitions for built-in Supabase Runtime APIs
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-
-// Define types for extracted data and responses
-interface ExtractedData {
-  problem: string;
-  schedule: string;
-  insurance: string;
-  booking_intent: "yes" | "no" | "clarification" | "not specified";
-  therapist_selection?: number; // 1, 2, or 3 for selecting from options
-}
-
-interface ChatResponse {
-  success: boolean;
-  extractedData?: ExtractedData;
-  followUpQuestion?: string;
-  nextAction: string;
-  inquiryId?: string;
-  message: string;
-  therapistId?: string;
-  startTime?: string;
-  endTime?: string;
-  aiResponse?: string; // Natural conversational response from AI
-}
-
-// CORS headers
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
 };
 
-console.log("Handle-Chat Function initialized (using @google/genai SDK)");
+// ═══════════════════════════════════════════════════════════════════════════
+// 🤖 KAI - YOUR FRIENDLY APPOINTMENT BOOKING ASSISTANT
+// ═══════════════════════════════════════════════════════════════════════════
+// Kai is a warm, empathetic, and intelligent assistant that helps users:
+// - Find the right therapist
+// - Book, view, cancel, and reschedule appointments
+// - Answer questions about insurance, availability, and therapist details
+// - Have natural, human-like conversations
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 📋 TOOL DEFINITIONS - What Kai can do
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TOOLS = {
+  function_declarations: [
+    {
+      name: "search_therapists",
+      description:
+        "Search for therapists by specialty, insurance, or general query. Use when user asks 'find me a therapist', 'who can help with X', 'show therapists', etc.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          specialty: {
+            type: "STRING",
+            description:
+              "Specialty area (anxiety, depression, PTSD, trauma, relationship issues, etc.)",
+          },
+          insurance: {
+            type: "STRING",
+            description: "Insurance provider name",
+          },
+          query: {
+            type: "STRING",
+            description: "General search query",
+          },
+        },
+      },
+    },
+    {
+      name: "get_therapist_details",
+      description:
+        "Get detailed information about a specific therapist. Use when user asks about a particular therapist by name.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          therapistName: {
+            type: "STRING",
+            description: "Name of the therapist",
+          },
+          therapistId: {
+            type: "STRING",
+            description: "ID of the therapist (if known)",
+          },
+        },
+      },
+    },
+    {
+      name: "check_available_slots",
+      description:
+        "Check what time slots are available for a therapist on a specific date. Use when user asks 'when is X available', 'what times work', etc.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          therapistId: { type: "STRING", description: "ID of the therapist" },
+          date: {
+            type: "STRING",
+            description:
+              "Date to check (today, tomorrow, YYYY-MM-DD, next Monday, etc.)",
+          },
+        },
+        required: ["therapistId", "date"],
+      },
+    },
+    {
+      name: "book_appointment",
+      description:
+        "Book an appointment. ONLY use after confirming user wants to book and slot is available.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          therapistId: { type: "STRING", description: "ID of the therapist" },
+          startTime: { type: "STRING", description: "ISO 8601 start time" },
+          endTime: { type: "STRING", description: "ISO 8601 end time" },
+          problem: { type: "STRING", description: "Reason for visit" },
+        },
+        required: ["therapistId", "startTime", "endTime"],
+      },
+    },
+    {
+      name: "view_my_appointments",
+      description:
+        "View user's appointments. Use when user asks 'when is my appointment', 'show my bookings', 'my schedule', etc.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          status: {
+            type: "STRING",
+            description:
+              "Filter: 'upcoming', 'past', or 'all'. Default: upcoming",
+          },
+        },
+      },
+    },
+    {
+      name: "cancel_appointment",
+      description:
+        "Cancel an appointment. Use when user says 'cancel my appointment'.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          appointmentId: {
+            type: "STRING",
+            description: "ID of appointment to cancel",
+          },
+        },
+        required: ["appointmentId"],
+      },
+    },
+    {
+      name: "reschedule_appointment",
+      description:
+        "Reschedule an existing appointment to a new time. Use when user says 'move my appointment', 'reschedule to'.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          appointmentId: {
+            type: "STRING",
+            description: "ID of appointment to reschedule",
+          },
+          newStartTime: {
+            type: "STRING",
+            description: "New ISO 8601 start time",
+          },
+          newEndTime: { type: "STRING", description: "New ISO 8601 end time" },
+        },
+        required: ["appointmentId", "newStartTime", "newEndTime"],
+      },
+    },
+    {
+      name: "list_accepted_insurance",
+      description:
+        "List all insurance providers we accept. Use when user asks 'what insurance do you accept' or 'do you take X insurance'.",
+      parameters: { type: "OBJECT", properties: {} },
+    },
+  ],
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KAI'S PERSONALITY & SYSTEM PROMPT
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildSystemPrompt(context: {
+  patientId: string;
+  timeZone: string;
+  currentTime: string;
+}): string {
+  return `You are Kai, a warm, empathetic appointment booking assistant for a therapy practice.
+
+YOUR PRIMARY GOAL:
+Get users successfully booked with a therapist as efficiently as possible while being supportive.
+
+YOUR PERSONALITY:
+- EMPATHETIC: Acknowledge feelings, but move toward solutions
+- EFFICIENT: Always progressing toward booking
+- PROACTIVE: Use tools immediately when you have enough information  
+- CLEAR: Give specific options, not vague questions
+- WARM: Be caring but concise
+
+BOOKING WORKFLOW (Your North Star):
+
+Step 1: Understand (1 message)
+- User shares what they're dealing with
+- Acknowledge briefly, validate feelings
+- Immediately search for therapists
+
+Step 2: Present Options (1 message)
+- Show 3-5 therapist options with specialties
+- Make it easy to choose
+
+Step 3: Check Availability (1 message)  
+- Once they pick a therapist, check available slots
+- Present specific times
+
+Step 4: Book (1 message)
+- Get confirmation
+- Book the appointment
+- Confirm!
+
+Target: 4-5 messages to complete booking
+
+HOW TO EXECUTE:
+
+When user shares a problem:
+- DON'T ask "tell me more" - just search for therapists
+- DO say "I hear you. Let me find therapists who specialize in that..."
+- Immediately call search_therapists
+
+When they pick a therapist:
+- DON'T ask "what days work"
+- DO immediately check availability  
+- Call check_available_slots and show times
+
+When they pick a time:
+- DON'T ask more questions
+- DO confirm and book immediately
+- Call book_appointment
+
+TOOL USAGE:
+
+1. search_therapists: Use when user mentions their problem
+2. check_available_slots: Use when they pick a therapist
+3. book_appointment: Use after they confirm time  
+4. view_my_appointments: When they ask about their schedule
+
+FORMATTING:
+
+When listing insurance:
+- Use bullet points
+- List: Blue Cross Blue Shield, Aetna, Cigna, UnitedHealthcare, Humana, Kaiser Permanente, Medicare, Medicaid
+- End with "Which one do you have?"
+
+When listing therapists:
+- Use numbered list (1, 2, 3)
+- Show name and 2-3 specialties
+- End with "Who sounds like a good fit?"
+
+TONE:
+- Sound like a helpful friend, not formal
+- Use contractions: "I've", "you're", "let's"
+- Skip "certainly" and "absolutely" - just be natural
+- Keep responses short: 2-3 sentences
+
+CURRENT CONTEXT:
+Time: ${context.currentTime}
+Timezone: ${context.timeZone}  
+Patient ID: ${context.patientId}
+
+KNOWLEDGE:
+- Insurance: Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare, Humana, Kaiser Permanente, Medicare, Medicaid
+- Working Hours: 9 AM - 5 PM
+- We have 14 therapists
+
+GOLDEN RULES:
+
+1. LISTEN then SEARCH then SHOW options
+2. They PICK then CHECK availability then OFFER times
+3. They CHOOSE then CONFIRM then BOOK
+4. BE BRIEF: 2-3 sentences
+5. BE PROACTIVE: Use tools immediately
+6. BE GOAL-ORIENTED: Every message moves toward booking
+
+Remember: You're a booking assistant. Be warm but focused on getting them booked with a therapist.`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🚀 MAIN HANDLER
+// ─────────────────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
+  console.log("🤖 Kai Assistant Loaded - v2.0 (Database Schema Compatible)");
+
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   try {
+    // Initialize Supabase client
     const supabaseClient = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
       Deno.env.get("SUPABASE_ANON_KEY") ?? "",
-      { global: { headers: { Authorization: req.headers.get("Authorization")! } } }
+      {
+        global: {
+          headers: { Authorization: req.headers.get("Authorization")! },
+        },
+      },
     );
 
+    // Parse request
     const body = await req.json();
-    const userMessage = body.userMessage || "";
-    const patientId = body.patientId || "anon-123";
-    const conversationHistory = body.conversationHistory || [];
-    const frontendMatchedTherapistId = body.matchedTherapistId || null;
-    const pendingTherapistMatches = body.pendingTherapistMatches || null; // Array of therapist options
+    const {
+      userMessage,
+      conversationHistory = [],
+      patientId = "anon-" + Date.now(),
+      timeZone = "Asia/Kolkata",
+    } = body;
 
     if (!userMessage) {
-      return new Response(JSON.stringify({ success: false, error: "userMessage is required" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      return jsonResponse(
+        { success: false, error: "Message is required" },
+        400,
+      );
     }
 
-    console.log("Processing message:", userMessage);
+    console.log(`📨 Message from ${patientId}: "${userMessage}"`);
 
-    let inquiry: any = null;
-    const existingInquiryId = await getInquiryId(supabaseClient, patientId);
-    if (existingInquiryId) {
-      const { data } = await supabaseClient.from('inquiries').select('*').eq('id', existingInquiryId).single();
-      inquiry = data;
-    }
-    console.log("Existing inquiry:", inquiry);
+    // Get or create inquiry record
+    const inquiry = await getOrCreateInquiry(supabaseClient, patientId);
 
-    if (frontendMatchedTherapistId && inquiry && !inquiry.matched_therapist_id) {
-      const { data: updatedInquiry, error } = await supabaseClient
-        .from('inquiries')
-        .update({ matched_therapist_id: frontendMatchedTherapistId, status: 'matched' })
-        .eq('id', inquiry.id)
-        .select()
-        .single();
+    // Build context
+    const context = {
+      patientId,
+      timeZone,
+      currentTime: new Date().toLocaleString("en-US", { timeZone }),
+    };
 
-      if (error) {
-        console.error("Error updating inquiry with matched_therapist_id", error);
-      } else {
-        inquiry = updatedInquiry;
-      }
-    }
+    // Attempt AI conversation with fallback
+    const result = await handleConversation({
+      supabaseClient,
+      userMessage,
+      conversationHistory,
+      context,
+      inquiry,
+      authHeader: req.headers.get("Authorization")!,
+    });
 
-    // Extract information from user message with enhanced conversational AI
-    const extractedData = await extractInfoWithGemini(userMessage, conversationHistory, inquiry, pendingTherapistMatches);
-    console.log("Extracted data:", extractedData);
-
-    // Generate natural conversational response
-    const aiResponse = await generateConversationalResponse(userMessage, conversationHistory, inquiry, extractedData);
-    console.log("AI Response:", aiResponse);
-
-    const inquiryId = await saveInquiry(supabaseClient, extractedData, patientId, inquiry?.id);
-    console.log("Inquiry saved/updated with ID:", inquiryId);
-
-    const { data: latestInquiry } = await supabaseClient.from('inquiries').select('*').eq('id', inquiryId).single();
-
-    const scheduleToUse = (extractedData.schedule && extractedData.schedule !== 'not specified') 
-        ? extractedData.schedule
-        : latestInquiry.requested_schedule;
-
-    // Handle therapist selection if user chose from options
-    if (extractedData.therapist_selection && pendingTherapistMatches && Array.isArray(pendingTherapistMatches)) {
-      const selectedIndex = extractedData.therapist_selection - 1;
-      if (selectedIndex >= 0 && selectedIndex < pendingTherapistMatches.length) {
-        const selectedTherapist = pendingTherapistMatches[selectedIndex];
-        
-        // Update inquiry with selected therapist
-        const { data: updatedInquiry, error: updateError } = await supabaseClient
-          .from('inquiries')
-          .update({ matched_therapist_id: selectedTherapist.id, status: 'matched' })
-          .eq('id', inquiryId)
-          .select()
-          .single();
-
-        if (updateError) {
-          console.error("Error updating inquiry with selected therapist:", updateError);
-        }
-
-        console.log(`✓ Therapist selected: ${selectedTherapist.name} (ID: ${selectedTherapist.id})`);
-        
-        // Check if we already have schedule - if yes, proceed to booking automatically
-        const hasSchedule = updatedInquiry?.requested_schedule || scheduleToUse;
-        
-        if (hasSchedule) {
-          console.log(`✓ Schedule exists: ${hasSchedule}. Auto-proceeding to booking.`);
-          // Don't return here - let it fall through to booking logic below
-          // Update latestInquiry to include the matched therapist
-          Object.assign(latestInquiry, updatedInquiry);
-        } else {
-          // No schedule yet - return and ask for it
-          console.log('⚠ No schedule found. Asking for schedule.');
-          return new Response(JSON.stringify({
-            success: true,
-            nextAction: 'therapist-selected',
-            inquiryId,
-            therapistId: selectedTherapist.id,
-            message: aiResponse,
-            aiResponse: aiResponse
-          }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-        }
-      }
-    }
-
-    // Handle booking if user confirmed and has matched therapist
-    // OR if therapist is matched and they just provided a schedule (implicit confirmation)
-    const shouldBook = latestInquiry?.matched_therapist_id && 
-                      (extractedData.booking_intent === 'yes' || 
-                       (extractedData.schedule && extractedData.schedule !== 'not specified'));
-    
-    if (shouldBook) {
-      console.log("=== BOOKING LOGIC ===");
-      console.log("Therapist matched:", latestInquiry.matched_therapist_id);
-      console.log("Schedule to use:", scheduleToUse);
-      console.log("Booking intent:", extractedData.booking_intent);
-      console.log("====================");
-      
-      if (scheduleToUse) {
-        const schedLower = scheduleToUse.toLowerCase();
-        console.log("=== PARSING SCHEDULE ===");
-        console.log("Input:", scheduleToUse);
-        
-        let appointmentDate = new Date();
-        let hour = 9, minute = 0;
-        let timeFound = false;
-        
-        // STEP 1: Extract TIME
-        let timeMatch = schedLower.match(/(\d{1,2})(?::(\d{2}))?\s*(?:am|pm)/);
-        if (timeMatch) {
-          hour = parseInt(timeMatch[1], 10);
-          minute = parseInt(timeMatch[2] || "0", 10);
-          const meridiem = schedLower.includes('pm') ? 'pm' : 'am';
-          if (meridiem === 'pm' && hour < 12) hour += 12;
-          if (meridiem === 'am' && hour === 12) hour = 0;
-          timeFound = true;
-          console.log(`✓ Found time with am/pm: ${hour}:${minute}`);
-        }
-        
-        if (!timeFound) {
-          timeMatch = schedLower.match(/\bat\s+(\d{1,2})(?::(\d{2}))?/);
-          if (timeMatch) {
-            hour = parseInt(timeMatch[1], 10);
-            minute = parseInt(timeMatch[2] || "0", 10);
-            if (hour >= 1 && hour <= 7) hour += 12;
-            timeFound = true;
-            console.log(`✓ Found time after 'at': ${hour}:${minute}`);
-          }
-        }
-        
-        if (hour < 6 || hour > 22) {
-          console.log(`⚠ Unusual hour ${hour}, resetting to 9 AM`);
-          hour = 9;
-          minute = 0;
-        }
-        
-        // STEP 2: Handle relative dates (tomorrow, next monday, etc.) BEFORE extracting month
-        const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-        let relativeDayFound = false;
-        
-        // Check for "tomorrow"
-        if (schedLower.includes('tomorrow')) {
-          appointmentDate = new Date();
-          appointmentDate.setDate(appointmentDate.getDate() + 1);
-          relativeDayFound = true;
-          console.log(`✓ Found 'tomorrow': ${appointmentDate.toDateString()}`);
-        }
-        
-        // Check for "next [day]" or "this [day]"
-        if (!relativeDayFound) {
-          for (let i = 0; i < dayNames.length; i++) {
-            const dayName = dayNames[i];
-            if (schedLower.includes(dayName)) {
-              const today = new Date();
-              const currentDay = today.getDay(); // 0 = Sunday, 1 = Monday, etc.
-              const targetDay = i;
-              
-              console.log(`Parsing day: "${dayName}"`);
-              console.log(`Current day: ${currentDay} (${dayNames[currentDay]})`);
-              console.log(`Target day: ${targetDay} (${dayName})`);
-              
-              let daysToAdd = 0;
-              
-              // Check if "next" is mentioned
-              if (schedLower.includes('next')) {
-                // "next thursday" = the upcoming/next occurrence of Thursday
-                // Same as just "thursday" - find the next occurrence
-                daysToAdd = (targetDay - currentDay + 7) % 7;
-                if (daysToAdd === 0) daysToAdd = 7; // If same day, go to next week
-                
-                console.log(`"next ${dayName}": ${daysToAdd} days (next occurrence)`);
-              } else if (schedLower.includes('this')) {
-                // "this friday" = this week's friday
-                daysToAdd = (targetDay - currentDay + 7) % 7;
-                if (daysToAdd === 0 && hour < today.getHours()) {
-                  daysToAdd = 7; // If passed today, go to next week
-                }
-                console.log(`"this ${dayName}": ${daysToAdd} days`);
-              } else {
-                // Just "monday" - assume next occurrence (soonest)
-                daysToAdd = (targetDay - currentDay + 7) % 7;
-                if (daysToAdd === 0) daysToAdd = 7; // If today, assume next week
-                console.log(`Just "${dayName}" (next occurrence): ${daysToAdd} days`);
-              }
-              
-              appointmentDate = new Date();
-              appointmentDate.setDate(appointmentDate.getDate() + daysToAdd);
-              relativeDayFound = true;
-              console.log(`✓ Found day '${dayName}' (${schedLower.includes('next') ? 'next' : schedLower.includes('this') ? 'this' : 'next occurrence'}): ${appointmentDate.toDateString()}`);
-              break;
-            }
-          }
-        }
-        
-        // STEP 3: Extract MONTH (only if no relative date was found)
-        let monthIndex = -1;
-        if (!relativeDayFound) {
-          const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
-                             'july', 'august', 'september', 'october', 'november', 'december'];
-          
-          for (let i = 0; i < monthNames.length; i++) {
-            if (schedLower.includes(monthNames[i]) || schedLower.includes(monthNames[i].substring(0, 3))) {
-              monthIndex = i;
-              console.log(`✓ Found month: ${monthNames[i]} (index ${i})`);
-              break;
-            }
-          }
-        }
-        
-        // STEP 4: Extract DAY (only if specific month was mentioned or no relative date)
-        if (!relativeDayFound) {
-          let dayOfMonth = appointmentDate.getDate();
-          let dayExplicitlyMentioned = false;
-          
-          const numberPattern = /(\d{1,2})/g;
-          const allNumbers = [...schedLower.matchAll(numberPattern)];
-          console.log(`All numbers found: ${allNumbers.map(m => m[1]).join(', ')}`);
-          
-          const candidateDays = allNumbers
-            .map(m => parseInt(m[1], 10))
-            .filter(num => {
-              // Skip if it's the hour (check both 12-hour and 24-hour format)
-              if (timeFound && (num === hour || num === (hour % 12) || (hour > 12 && num === (hour - 12)))) {
-                console.log(`  Skipping ${num} - it's the hour`);
-                return false;
-              }
-              // Skip if it's the minute
-              if (timeFound && num === minute) {
-                console.log(`  Skipping ${num} - it's the minute`);
-                return false;
-              }
-              // Skip if out of valid day range
-              if (num < 1 || num > 31) {
-                console.log(`  Skipping ${num} - out of valid day range`);
-                return false;
-              }
-              return true;
-            });
-          
-          if (candidateDays.length > 0) {
-            dayOfMonth = candidateDays[0];
-            dayExplicitlyMentioned = true;
-            console.log(`✓ Using day: ${dayOfMonth}`);
-          }
-          
-          // STEP 5: Construct the final date (only if month specified or day number found)
-          if (monthIndex !== -1) {
-            appointmentDate = new Date(2025, monthIndex, dayOfMonth);
-          } else if (dayExplicitlyMentioned) {
-            // User mentioned a specific day number without month
-            appointmentDate.setDate(dayOfMonth);
-          }
-          // else: keep current date (will check if in past below)
-        }
-        
-        appointmentDate.setHours(hour, minute, 0, 0);
-        
-        // CRITICAL: Multiple safety checks to ensure future appointment
-        const now = new Date();
-        console.log(`Current time: ${now.toLocaleString()}`);
-        console.log(`Appointment before checks: ${appointmentDate.toLocaleString()}`);
-        
-        // Check 1: If in the past, move forward
-        if (appointmentDate < now) {
-          console.log(`⚠️ PAST DATE DETECTED: ${appointmentDate.toLocaleString()} < ${now.toLocaleString()}`);
-          
-          // If a specific day was mentioned (like "15th"), advance to next month
-          // Otherwise (just time like "9am"), advance to next day
-          if (!relativeDayFound && monthIndex === -1) {
-            console.log(`→ Only time provided, moving to tomorrow`);
-            appointmentDate.setDate(appointmentDate.getDate() + 1);
-          } else {
-            // Specific date mentioned but it's in the past - try next month/week
-            console.log(`→ Specific date in past, advancing`);
-            if (monthIndex !== -1) {
-              // Add 1 year if specific month/day is past
-              appointmentDate.setFullYear(appointmentDate.getFullYear() + 1);
-            } else if (relativeDayFound) {
-              // For relative days, add 7 days
-              appointmentDate.setDate(appointmentDate.getDate() + 7);
-            } else {
-              // Generic fallback - add 1 day
-              appointmentDate.setDate(appointmentDate.getDate() + 1);
-            }
-          }
-        }
-        
-        // Check 2: ABSOLUTE GUARANTEE - if STILL in past, keep adding days until future
-        let safetyCounter = 0;
-        while (appointmentDate < now && safetyCounter < 365) {
-          console.log(`⚠️ STILL IN PAST after adjustment, adding another day`);
-          appointmentDate.setDate(appointmentDate.getDate() + 1);
-          safetyCounter++;
-        }
-        
-        console.log(`✓ Final datetime: ${appointmentDate.toLocaleString()}`);
-        console.log(`✓ Verified future: ${appointmentDate > now ? 'YES' : 'NO'}`);
-        console.log("======================");
-        
-        
-        const pad = (n: number) => n.toString().padStart(2, '0');
-        const startTimeStr = `${appointmentDate.getFullYear()}-${pad(appointmentDate.getMonth() + 1)}-${pad(appointmentDate.getDate())}T${pad(appointmentDate.getHours())}:${pad(appointmentDate.getMinutes())}:00`;
-        
-        appointmentDate.setHours(appointmentDate.getHours() + 1);
-        const endTimeStr = `${appointmentDate.getFullYear()}-${pad(appointmentDate.getMonth() + 1)}-${pad(appointmentDate.getDate())}T${pad(appointmentDate.getHours())}:${pad(appointmentDate.getMinutes())}:00`;
-
-        return new Response(JSON.stringify({
-          success: true,
-          nextAction: 'book-appointment',
-          message: aiResponse,
-          inquiryId: latestInquiry.id,
-          therapistId: latestInquiry.matched_therapist_id,
-          startTime: startTimeStr,
-          endTime: endTimeStr,
-          timeZone: 'Asia/Kolkata',
-          aiResponse: aiResponse
-        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      } else {
-        return new Response(JSON.stringify({
-          success: true,
-          nextAction: 'awaiting-info',
-          message: aiResponse,
-          inquiryId: latestInquiry.id,
-          aiResponse: aiResponse
-        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      }
-    }
-
-    const response = prepareResponse(latestInquiry, inquiryId, aiResponse);
-    return new Response(JSON.stringify(response), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-
-  } catch (error) {
-    console.error("Error in handle-chat:", error);
-    const errorMessage = error instanceof Error ? error.message : "An unexpected error occurred";
-    return new Response(JSON.stringify({ success: false, error: errorMessage }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return jsonResponse(result);
+  } catch (error: any) {
+    console.error("❌ Fatal Error:", error);
+    return jsonResponse(
+      {
+        success: false,
+        error: "Something went wrong. Please try again.",
+        message:
+          "❤️ Sorry, I encountered an error. Could you try rephrasing that?",
+      },
+      500,
+    );
   }
 });
 
-async function getInquiryId(supabase: any, patientId: string): Promise<string | null> {
-    if (!patientId) return null;
-    const { data, error } = await supabase.from('inquiries').select('id').eq('patient_identifier', patientId).order('created_at', { ascending: false }).limit(1).single();
-    if (error || !data) return null;
-    return data.id;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧠 CONVERSATION HANDLER - The brain of the operation
+// ─────────────────────────────────────────────────────────────────────────────
 
-async function saveInquiry(supabase: any, extractedData: ExtractedData, patientId?: string, existingInquiryId?: string): Promise<string> {
-  const inquiryData: { [key: string]: any } = { patient_identifier: patientId || null };
-  if (extractedData.problem && extractedData.problem !== 'not specified') inquiryData.extracted_specialty = extractedData.problem;
-  if (extractedData.schedule && extractedData.schedule !== 'not specified') inquiryData.requested_schedule = extractedData.schedule;
-  if (extractedData.insurance && extractedData.insurance !== 'not specified') inquiryData.insurance_info = extractedData.insurance;
+async function handleConversation({
+  supabaseClient,
+  userMessage,
+  conversationHistory,
+  context,
+  inquiry,
+  authHeader,
+}: any) {
+  const apiKey = Deno.env.get("GEMINI_API_KEY");
 
-  if (existingInquiryId) {
-    const { data, error } = await supabase.from("inquiries").update(inquiryData).eq('id', existingInquiryId).select().single();
-    if (error) throw new Error(`Failed to update inquiry: ${error.message}`);
-    return data.id;
-  } else {
-    inquiryData.status = 'pending';
-    const { data, error } = await supabase.from("inquiries").insert(inquiryData).select().single();
-    if (error) throw new Error(`Failed to save inquiry: ${error.message}`);
-    return data.id;
-  }
-}
-
-function prepareResponse(inquiry: any, inquiryId: string, aiResponse?: string): ChatResponse {
-  const missingInfo: string[] = [];
-  if (!inquiry.extracted_specialty) missingInfo.push("problem");
-  if (!inquiry.requested_schedule) missingInfo.push("schedule");
-  if (!inquiry.insurance_info) missingInfo.push("insurance");
-
-  console.log("=== PREPARE RESPONSE DEBUG ===");
-  console.log("Missing info:", missingInfo);
-  console.log("Therapist matched:", inquiry.matched_therapist_id ? "YES" : "NO");
-  console.log("==============================");
-
-  // If all info is collected
-  if (missingInfo.length === 0) {
-    // Check if therapist is already matched
-    if (inquiry.matched_therapist_id) {
-      // Therapist already selected - ask for booking confirmation or await booking
-      console.log("✓ Therapist already matched, awaiting booking confirmation");
-      return {
-        success: true,
-        nextAction: "awaiting-booking-confirmation",
-        inquiryId,
-        message: aiResponse || "Perfect! Would you like me to book this appointment for you?",
-        aiResponse: aiResponse
-      };
-    } else {
-      // No therapist yet - search for matches
-      console.log("✓ All info collected, searching for therapists");
-      return {
-        success: true,
-        nextAction: "find-therapist",
-        inquiryId,
-        message: aiResponse || "Thank you! I have all the information I need. Let me find the best therapist matches for you.",
-        aiResponse: aiResponse
-      };
+  // Try AI-powered conversation first
+  if (apiKey) {
+    try {
+      return await aiConversation({
+        supabaseClient,
+        userMessage,
+        conversationHistory,
+        context,
+        inquiry,
+        authHeader,
+        apiKey,
+      });
+    } catch (error) {
+      console.warn(
+        "⚠️ AI conversation failed, falling back to rule-based:",
+        error,
+      );
     }
   }
 
-  // Still missing info
+  // Fallback to rule-based conversation
+  return await ruleBasedConversation({
+    supabaseClient,
+    userMessage,
+    context,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🤖 AI-POWERED CONVERSATION (Using Gemini)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function aiConversation({
+  supabaseClient,
+  userMessage,
+  conversationHistory,
+  context,
+  inquiry,
+  authHeader,
+  apiKey,
+}: any) {
+  const systemPrompt = buildSystemPrompt(context);
+
+  // Build conversation contents
+  const contents: any[] = conversationHistory.map((msg: any) => ({
+    role: msg.role === "assistant" ? "model" : "user",
+    parts: [{ text: msg.content }],
+  }));
+  contents.push({ role: "user", parts: [{ text: userMessage }] });
+
+  // FREE TIER OPTIMIZED: Use only one model to save quota
+  // gemini-1.5-flash has the best free tier limits (1500 req/day)
+  const PRIMARY_MODEL = "gemini-1.5-flash";
+
+  let finalResponse = "";
+  let bookingResult: any = null;
+  let appointmentData: any = null;
+
+  // FREE TIER OPTIMIZED: Reduced to 2 turns max (1 for tool call, 1 for response)
+  // This prevents burning quota on complex multi-turn conversations
+  const MAX_TURNS = 2;
+
+  for (let turn = 0; turn < MAX_TURNS; turn++) {
+    try {
+      const url =
+        `https://generativelanguage.googleapis.com/v1beta/models/${PRIMARY_MODEL}:generateContent?key=${apiKey}`;
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents,
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          tools: [TOOLS],
+          generationConfig: {
+            temperature: 0.5, // Lower = more deterministic, fewer tokens
+            topP: 0.8,
+            topK: 20,
+            maxOutputTokens: 500, // Limit response size to save tokens
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`❌ API Error (${response.status}):`, errorText);
+
+        // ANY error = immediate fallback (save quota!)
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const responseData = await response.json();
+      console.log(`✅ API call ${turn + 1} successful`);
+
+      const candidate = responseData.candidates?.[0];
+      const parts = candidate?.content?.parts || [];
+
+      // Check for function calls
+      const functionCalls = parts.filter((p: any) => p.functionCall);
+      const textParts = parts.filter((p: any) => p.text).map((p: any) => p.text)
+        .join("");
+
+      if (functionCalls.length > 0) {
+        // Execute tools (this doesn't use API quota)
+        console.log(`🔧 Executing ${functionCalls.length} tool(s)`);
+        contents.push({ role: "model", parts });
+
+        const toolResponses = [];
+        for (const fc of functionCalls) {
+          const { name, args } = fc.functionCall;
+          let result: any = { error: "Unknown tool" };
+
+          try {
+            result = await executeTool(name, args, {
+              supabaseClient,
+              context,
+              inquiry,
+              authHeader,
+            });
+
+            // Track booking results
+            if (name === "book_appointment" && result.success) {
+              bookingResult = result;
+              appointmentData = result.appointment;
+            }
+          } catch (error: any) {
+            console.error(`Tool ${name} error:`, error);
+            result = { error: error.message };
+          }
+
+          toolResponses.push({
+            functionResponse: {
+              name,
+              response: { content: result },
+            },
+          });
+        }
+
+        contents.push({ role: "function", parts: toolResponses });
+        // Continue to next turn to get AI's response to tool results
+      } else {
+        // Got final text response - we're done!
+        finalResponse = textParts;
+        break;
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ Turn ${turn + 1} failed:`, error.message);
+      // Immediately fall back to rule-based (don't waste more quota!)
+      throw error;
+    }
+  }
+
   return {
     success: true,
-    nextAction: "awaiting-info",
-    inquiryId,
-    message: aiResponse || "I need a bit more information to help you better.",
-    aiResponse: aiResponse
+    message: finalResponse || "I'm here to help! What would you like to do?",
+    aiResponse: finalResponse,
+    nextAction: bookingResult ? "booked" : "awaiting-info",
+    inquiryId: inquiry.id,
+    appointment: appointmentData,
   };
 }
 
-async function generateConversationalResponse(
-  userMessage: string,
-  conversationHistory: Array<{ role: string; content: string }>,
-  inquiry: any,
-  extractedData: ExtractedData
-): Promise<string> {
-  const apiKey = Deno.env.get("GEMINI_API_KEY")?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set");
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔧 TOOL EXECUTOR - Routes to the right handler
+// ─────────────────────────────────────────────────────────────────────────────
 
-  let contextMessages = "";
-  if (conversationHistory && conversationHistory.length > 0) {
-    // Basic mapping: user->user, assistant->model
-    const recentHistory = conversationHistory.slice(-6); 
-    contextMessages = recentHistory.map((msg) => `${msg.role}: ${msg.content}`).join("\n") + "\n\n";
+async function executeTool(name: string, args: any, deps: any) {
+  console.log(`🔧 Tool: ${name}`, args);
+
+  switch (name) {
+    case "search_therapists":
+      return await toolSearchTherapists(deps.supabaseClient, args);
+
+    case "get_therapist_details":
+      return await toolGetTherapistDetails(deps.supabaseClient, args);
+
+    case "check_available_slots":
+      return await toolCheckAvailableSlots(
+        deps.supabaseClient,
+        args,
+        deps.context.timeZone,
+      );
+
+    case "book_appointment":
+      return await toolBookAppointment(
+        deps.supabaseClient,
+        args,
+        deps.inquiry,
+        deps.authHeader,
+      );
+
+    case "view_my_appointments":
+      return await toolViewMyAppointments(
+        deps.supabaseClient,
+        deps.context.patientId,
+        args,
+        deps.context.timeZone,
+      );
+
+    case "cancel_appointment":
+      return await toolCancelAppointment(
+        deps.supabaseClient,
+        args,
+        deps.authHeader,
+      );
+
+    case "reschedule_appointment":
+      return await toolRescheduleAppointment(
+        deps.supabaseClient,
+        args,
+        deps.context.timeZone,
+      );
+
+    case "list_accepted_insurance":
+      return toolListInsurance();
+
+    default:
+      return { error: `Unknown tool: ${name}` };
   }
-
-  // Build context about what we know
-  let knownContext = "";
-  if (inquiry) {
-    if (inquiry.extracted_specialty) knownContext += `The user mentioned dealing with: ${inquiry.extracted_specialty}. `;
-    if (inquiry.requested_schedule) knownContext += `They prefer scheduling around: ${inquiry.requested_schedule}. `;
-    if (inquiry.insurance_info) knownContext += `Their insurance is: ${inquiry.insurance_info}. `;
-  }
-
-  const missingInfo: string[] = [];
-  if (!inquiry?.extracted_specialty && extractedData.problem === 'not specified') missingInfo.push("what they're going through");
-  if (!inquiry?.requested_schedule && extractedData.schedule === 'not specified') missingInfo.push("when they're available");
-  if (!inquiry?.insurance_info && extractedData.insurance === 'not specified') missingInfo.push("insurance provider");
-
-  const systemInstruction = `You are "Kai", an empathetic and warm therapy booking assistant. Your goal is to help users find the right therapist while making them feel heard and supported.
-
-BOOKING FUNNEL - You need to gently collect these 3 pieces of info:
-1. Their problem/concern (anxiety, depression, relationship, etc.)
-2. Their availability/schedule preference
-3. Their insurance provider
-
-Current Status:
-${knownContext || "No information collected yet."}
-
-Missing Info: ${missingInfo.length > 0 ? missingInfo.join(", ") : "All info collected! Ready to find therapist."}
-
-RESPONSE RULES:
-1. **Empathy First**: ALWAYS validate the user's feelings or situation before asking for business. If they share a struggle, acknowledge it warmly (e.g., "I'm so sorry you're going through that," or "It sounds like you've been carrying a lot.").
-2. **Be Supportive**: Use a caring, non-judgmental tone.
-3. **Gentle Guidance**: After validating, gently guide the user to the next step.
-4. **One Thing at a Time**: Ask for only ONE missing piece of information at a time to avoid overwhelming them.
-5. **Concise but Kind**: Keep responses reasonable in length (3-4 sentences), balancing warmth with efficiency.
-
-Example good response: "I'm really sorry to hear you've been feeling that way. It takes courage to reach out. To help us find the best support for you, do you have a specific insurance provider you'd like to use?"
-`;
-
-  const contents = [
-    {
-      role: "user",
-      parts: [{ text: `Conversation History:\n${contextMessages}\n\nUser's Request: ${userMessage}` }]
-    }
-  ];
-
-  // Using models with best free tier limits (gemini-1.5-flash has 1500 RPD)
-  const strategies = [
-    { model: "gemini-1.5-flash", version: "v1beta" },        // Best free tier limits
-    { model: "gemini-1.5-flash-latest", version: "v1beta" }, // Latest 1.5 flash
-    { model: "gemini-flash-latest", version: "v1beta" }      // Generic flash fallback
-  ];
-
-  for (const strategy of strategies) {
-    try {
-      console.log(`[REST] Attempting ${strategy.model} on ${strategy.version}...`);
-      const url = `https://generativelanguage.googleapis.com/${strategy.version}/models/${strategy.model}:generateContent?key=${apiKey}`;
-      
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: contents,
-          systemInstruction: { parts: [{ text: systemInstruction }] },
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 250
-          }
-        })
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        console.error(`[REST] Error from ${strategy.model} (${strategy.version}):`, data.error?.message);
-        continue; 
-      }
-
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (text) return text;
-      
-    } catch (err: any) {
-      console.error(`[REST] Failed ${strategy.model}:`, err.message);
-    }
-  }
-
-  // Fallback: Generate a helpful response based on what's missing
-  console.warn("All Gemini models failed - using fallback response generation");
-  return generateFallbackResponse(userMessage, inquiry, extractedData, missingInfo);
 }
 
-/**
- * Generate a helpful response when Gemini API is unavailable.
- * This function prioritizes warmth, empathy, and conversational flow.
- */
-function generateFallbackResponse(
-  userMessage: string,
-  inquiry: any,
-  extractedData: ExtractedData,
-  missingInfo: string[]
-): string {
-  // Helpers for variety
-  const pick = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
-  const lowerMsg = userMessage.toLowerCase();
-  
-  // Determine emotional context from current message OR previous inquiry data
-  const emotionalKeywords = ['sad', 'grief', 'depressed', 'pain', 'hurt', 'struggling', 'hard', 
-                             'hopeless', 'overwhelmed', 'anxious', 'scared', 'lost', 'alone', 
-                             'crying', 'die', 'death', 'loss', 'fail', 'failed', 'failing', 
-                             'mock', 'mocking', 'bully', 'bullying', 'embarrassed', 'ashamed', 
-                             'worthless', 'rejected', 'abandoned'];
-  const isCurrentlyEmotional = emotionalKeywords.some(k => lowerMsg.includes(k));
-  
-  // Check if they shared something emotional earlier (stored in inquiry)
-  const previousSpecialty = inquiry?.extracted_specialty?.toLowerCase() || '';
-  const hasEmotionalHistory = emotionalKeywords.some(k => previousSpecialty.includes(k)) || 
-                              previousSpecialty.includes('grief') || 
-                              previousSpecialty.includes('depression') ||
-                              previousSpecialty.includes('anxiety');
-  
-  const isEmotionalContext = isCurrentlyEmotional || hasEmotionalHistory;
-  
-  // 🚨 CRISIS DETECTION - Must be checked first
-  const crisisKeywords = ['suicide', 'suicidal', 'kill myself', 'end my life', 'want to die', 
-                          'self harm', 'self-harm', 'hurt myself', 'cutting'];
-  const isCrisis = crisisKeywords.some(k => lowerMsg.includes(k));
-  
-  if (isCrisis) {
-    return `I'm really glad you reached out, and I want you to know that what you're feeling matters. Your life matters. 💙
+// ─────────────────────────────────────────────────────────────────────────────
+// 🛠️ TOOL IMPLEMENTATIONS - Database Schema Compatible
+// ─────────────────────────────────────────────────────────────────────────────
 
-Please know that immediate help is available:
-🆘 **988 Suicide & Crisis Lifeline**: Call or text 988 (24/7, free, confidential)
-🆘 **Crisis Text Line**: Text HOME to 741741
+async function toolSearchTherapists(supabase: any, args: any) {
+  const { specialty, insurance, query } = args;
 
-I'm here to help connect you with a therapist who can provide ongoing support. To find the best match for you as quickly as possible, could you share a bit about what you're going through? And please, if you're in immediate danger, reach out to 988 right now—they're trained to help.`;
-  }
-  
-  // 🚨 TRAUMA/VIOLENCE DETECTION - Check after crisis
-  const traumaKeywords = ['kill me', 'tried to kill', 'attacked me', 'assault', 'rape', 'raped', 
-                          'abused', 'abuse', 'violence', 'violent', 'threatened', 'hurt me',
-                          'hit me', 'beaten', 'stabbed', 'shot'];
-  const isTrauma = traumaKeywords.some(k => lowerMsg.includes(k));
-  
-  if (isTrauma) {
-    // If they just shared trauma, acknowledge it with deep empathy
-    if (missingInfo.includes("when they're available")) {
-      return pick([
-        "I'm so sorry that happened to you. That's an incredibly traumatic experience, and you didn't deserve any of it. 💙 Your safety and healing matter. I want to get you connected with a trauma-specialized therapist as soon as possible. When would you be able to meet with someone?",
-        "What you've been through is terrible, and I'm really glad you're reaching out for help. That takes incredible strength. Let's find you trauma-informed support urgently. When are you available for a session?",
-        "I hear you, and I'm so sorry you experienced that violence. You deserve safety and healing. Let's prioritize getting you connected with someone who specializes in trauma. When works for you?"
-      ]);
-    }
-    // For other missing info, acknowledge trauma in all responses
-    if (missingInfo.includes("insurance provider")) {
-      return "You're doing incredibly well by reaching out after what you've been through. 💙 One last thing to connect you with trauma-specialized care: do you have an insurance provider? (e.g., Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare)";
-    }
-  }
-  
-  // If user just greeted, welcome them warmly
-  if (lowerMsg.length < 20 && (lowerMsg.includes('hi') || lowerMsg.includes('hello') || lowerMsg.includes('hey'))) {
-    return pick([
-      "Hi, I'm Kai. 💙 I'm here to help you find a therapist who truly understands what you're going through. There's no rush—take your time. What's been on your mind lately?",
-      "Hello, I'm Kai. I'm really glad you reached out. Finding the right support is such an important step. What brings you here today?",
-      "Hi there. 🌿 I'm Kai, and I'm here to listen. Reaching out takes courage, and I want to make this as easy as possible for you. What's going on?"
-    ]);
-  }
-  
-  // If therapist selection was detected
-  if (extractedData.therapist_selection) {
-    // Check if we already have schedule info
-    const hasSchedule = inquiry?.requested_schedule || (extractedData.schedule && extractedData.schedule !== 'not specified');
-    
-    if (hasSchedule) {
-      // Schedule already exists - just confirm selection
-      return pick([
-        "Perfect choice! I think they'll be a wonderful fit for you. Let me get that booked for you.",
-        "Excellent. I have a really good feeling about this match. I'll set that up now.",
-        "Great choice. Let me confirm your appointment with them."
-      ]);
-    } else {
-      // No schedule yet - ask for it
-      return pick([
-        "Perfect choice! I think they'll be a wonderful fit for you. When would you like to schedule your first session?",
-        "Excellent. I have a really good feeling about this match. What time works best for you?",
-        "Great choice. Let's get you booked with them. When are you typically available?"
-      ]);
-    }
-  }
-  
-  // If booking intent detected "yes"
-  if (extractedData.booking_intent === 'yes') {
-    return pick([
-      "I'm so glad you're taking this step. Let me confirm that appointment for you right now. 💙",
-      "Wonderful—you're doing something really positive for yourself. I'm securing that time for you.",
-      "That's great. I'm finalizing your booking now. You're going to be in good hands."
-    ]);
-  }
-  
-  // NEW: If user just shared emotional details (problem extracted), acknowledge it warmly
-  if (extractedData.problem && extractedData.problem !== 'not specified' && !inquiry?.extracted_specialty) {
-    // This is the first time they shared their problem
-    if (isCurrentlyEmotional) {
-      // Continue asking for missing info but with extra empathy
-      // The logic below will handle this with emotional context
-    }
-  }
-  
-  // If all info is collected - acknowledge warmly and transition
-  if (missingInfo.length === 0) {
-    if (extractedData.insurance && extractedData.insurance !== 'not specified') {
-      if (isEmotionalContext) {
-        return pick([
-          `Thank you for sharing that. I know this hasn't been easy, but you're almost there. Let me find a compassionate therapist who accepts ${extractedData.insurance} and specializes in what you're going through.`,
-          `Got it—${extractedData.insurance}. I'm searching for someone who can really support you through this. One moment. 💙`,
-          `Perfect. I'm going to find the best match for you—someone who understands and can help. Hang tight.`
-        ]);
-      }
-      return pick([
-        `Great, ${extractedData.insurance} works. Let me find the best therapist matches for you right now.`,
-        `Thanks! I'm searching for therapists who accept ${extractedData.insurance} and fit your needs.`,
-        `Got it. Let me find some great options for you.`
-      ]);
-    }
-    if (extractedData.schedule && extractedData.schedule !== 'not specified') {
-      return pick([
-        "Perfect, I've noted that. Let me find someone who's available and can really help you.",
-        "That works. I'm searching for a therapist who can see you then and support you well.",
-        "Great. Let me match you with someone available at that time."
-      ]);
-    }
-    if (isEmotionalContext) {
-      return pick([
-        "Thank you for trusting me with this. I have everything I need. Let me find someone who can truly support you through what you're experiencing. 💙",
-        "I'm going to find you a therapist who specializes in exactly what you're dealing with. You deserve that support.",
-        "You've taken a big step today. Let me find the right person to help you on this journey."
-      ]);
-    }
-    return pick([
-      "I have everything I need. Let me find the best therapist matches for you.",
-      "Perfect! Searching for the right therapist for you now.",
-      "Great—let's get you connected with someone who can help."
-    ]);
-  }
-  
-  // --- SPECIAL CASE: User is elaborating on their problem ---
-  // If problem already exists but user is sharing more emotional details, acknowledge it
-  if (inquiry?.extracted_specialty && isCurrentlyEmotional && !extractedData.schedule && !extractedData.insurance) {
-    // User is opening up more about their situation
-    if (lowerMsg.includes('height') || lowerMsg.includes('short') || lowerMsg.includes('tall')|| lowerMsg.includes('appearance') || lowerMsg.includes('looks')) {
-      if (missingInfo.includes("when they're available")) {
-        return pick([
-          "I'm really sorry you're experiencing that. Being judged for how you look is incredibly painful, and you deserve so much better. 💙 Let's find you someone who can help you work through this. When are you usually available for a session?",
-          "That kind of treatment is really hard to deal with, especially when it's about something you can't control. I want to connect you with support. When would be a good time for you?",
-          "I hear you. That sounds really tough, and I'm glad you're reaching out. Let's get you the help you deserve. When works best for your schedule?"
-        ]);
-      }
-    }
-    
-    // Other elaborations (mock, bully, etc.) are already handled in the schedule section below
-  }
-  
-  // --- ASKING FOR MISSING INFO (with emotional context awareness) ---
+  // Start with all active therapists
+  let therapists: any[] = [];
 
-  // Missing: Problem/concern
-  if (missingInfo.includes("what they're going through")) {
-    return pick([
-      "I'm here to listen, no judgment at all. Could you share a little about what's been weighing on you? It helps me find the right kind of support for you.",
-      "Take your time. What's been going on that made you want to reach out? I want to make sure I connect you with someone who truly understands.",
-      "I'd love to help you find the right fit. Can you tell me a bit about what you're going through—whether it's stress, sadness, relationships, or something else?"
-    ]);
-  }
-  
-  // Missing: Schedule - this is where the conversation was dying!
-  if (missingInfo.includes("when they're available")) {
-    if (isEmotionalContext) {
-      // Check for specific painful keywords to be even more empathetic
-      if (lowerMsg.includes('fail') || lowerMsg.includes('mock') || lowerMsg.includes('bully') || lowerMsg.includes('embarrassed')) {
-        return pick([
-          "I'm really sorry that happened to you. That sounds incredibly painful, especially dealing with others' judgment on top of your own feelings. 💙 Let's get you connected with someone who can help you process this. When would be a good time for a session?",
-          "That must be so hard, carrying that weight and dealing with how others are treating you. You don't deserve that. Let's find you support soon—when are you usually available to talk with someone?",
-          "I hear you, and I want you to know that failing doesn't define you, and how others are treating you says more about them than you. Let's get you the support you deserve. When works for you to meet with a therapist?"
-        ]);
-      }
-      return pick([
-        "I hear you, and I'm so sorry you're carrying this. 💙 Let's get you connected with someone soon. When would work for you to have a session?",
-        "What you're going through sounds really hard. I want to help you find support as quickly as possible. When are you usually free?",
-        "I'm glad you're here. Let's find a time that works for you to speak with someone who can help. Any particular days or times that are best?"
-      ]);
-    }
-    return pick([
-      "Thanks for sharing that with me. When would be a good time for you to meet with a therapist?",
-      "I appreciate you opening up. What days or times generally work best for your schedule?",
-      "That's helpful to know. When are you usually available for appointments?"
-    ]);
-  }
-  
-  // Missing: Insurance - CRITICAL: This is where the bot sounded dead before
-  if (missingInfo.includes("insurance provider")) {
-    if (isEmotionalContext) {
-      return pick([
-        "You're doing great—just one more thing so I can find you the best match. 💙 Do you have insurance you'd like to use? (We work with Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare, and others)",
-        "Almost there. I want to make sure whoever I match you with can provide affordable care. Do you plan to use insurance? Common providers we work with include Aetna, Blue Cross, Cigna, UnitedHealthcare.",
-        "We're so close to getting you connected with help. Last question: do you have an insurance provider? (e.g., Aetna, Blue Cross Blue Shield, Cigna, etc.)"
-      ]);
-    }
-    return pick([
-      "Great, we're almost done! Which insurance provider do you have? (e.g., Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare, Humana, etc.)",
-      "Just one more thing—which insurance provider would you like to use? We accept Aetna, Blue Cross, Cigna, UnitedHealthcare, and many others.",
-      "Thanks! Last question: which insurance provider do you have? Common ones include Aetna, Blue Cross Blue Shield, Cigna, UnitedHealthcare."
-    ]);
-  }
-  
-  // Generic fallback (should rarely hit this)
-  if (isEmotionalContext) {
-    return "I'm here with you. 💙 To help me find the best therapist for you, could you tell me a little more about what you need?";
-  }
-  return "I want to make sure I find the right match for you. Could you tell me a bit more about what you're looking for?";
-}
+  const { data, error } = await supabase
+    .from("therapists")
+    .select("id, name, bio, specialties, accepted_insurance")
+    .eq("is_active", true);
 
-async function extractInfoWithGemini(
-  userMessage: string,
-  conversationHistory?: Array<{ role: string; content: string }>,
-  inquiry?: any,
-  pendingTherapistMatches?: any
-): Promise<ExtractedData> {
-  const apiKey = Deno.env.get("GEMINI_API_KEY")?.trim();
-  if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set");
-
-  let contextMessages = "";
-  if (conversationHistory && conversationHistory.length > 0) {
-    contextMessages = conversationHistory.map((msg) => `${msg.role}: ${msg.content}`).join("\n") + "\n\n";
+  if (error) {
+    console.error("DB error:", error);
+    return { error: "Couldn't fetch therapists" };
   }
 
-  const bookingPrompt = inquiry?.matched_therapist_id
-    ? `The user has been matched with a therapist and was asked if they want to book. Analyze their response for booking intent. If they provide a time, extract it into the 'schedule' field.`
-    : "";
+  therapists = data || [];
+  const allTherapists = [...therapists]; // Keep a copy of all therapists
 
-  const therapistSelectionPrompt = pendingTherapistMatches
-    ? `The user was presented with therapist options. Check if they're selecting one (e.g., "first one", "number 2", "the second therapist", "option 1"). If so, extract the number (1, 2, or 3) into therapist_selection field.`
-    : "";
-
-  // Hardcoded safety check for simple greetings
-  const lowerMsg = userMessage.toLowerCase().trim();
-  const greetings = ['hi', 'hello', 'hey', 'heyy', 'greetings', 'yo', 'sup', 'good morning', 'good afternoon', 'good evening'];
-  if (lowerMsg.length < 20 && greetings.some(g => lowerMsg.includes(g))) {
-      return {
-          problem: "not specified",
-          schedule: "not specified",
-          insurance: "not specified",
-          booking_intent: "not specified"
-      };
+  // Filter by specialty
+  if (specialty) {
+    const spec = specialty.toLowerCase();
+    therapists = therapists.filter((t: any) =>
+      t.specialties &&
+      JSON.stringify(t.specialties).toLowerCase().includes(spec)
+    );
   }
 
-  // Construct known info string
-  let knownInfo = "Known Information so far:\n";
-  if (inquiry) {
-      if (inquiry.extracted_specialty) knownInfo += `- Problem: ${inquiry.extracted_specialty}\n`;
-      if (inquiry.requested_schedule) knownInfo += `- Schedule: ${inquiry.requested_schedule}\n`;
-      if (inquiry.insurance_info) knownInfo += `- Insurance: ${inquiry.insurance_info}\n`;
+  // Filter by insurance
+  if (insurance) {
+    const ins = insurance.toLowerCase();
+    therapists = therapists.filter((t: any) =>
+      t.accepted_insurance &&
+      JSON.stringify(t.accepted_insurance).toLowerCase().includes(ins)
+    );
   }
 
-  const systemInstruction = `You are a strict data extractor for a therapy booking system.
-ONLY extract clear, actionable booking information. Mark vague or off-topic responses as "not specified".
-
-EXTRACTION GOALS:
-1. "problem": Specific medical/psychological issue (anxiety, depression, PTSD, relationship issues, etc.)
-   - Mark as "not specified" if: general chitchat, vague feelings, or no clear condition mentioned
-2. "schedule": Specific date/time preferences (e.g., "Monday 3pm", "weekday afternoons", "December 15")
-   - Mark as "not specified" if: vague like "soon" or "whenever"
-3. "insurance": Insurance provider name (Aetna, Blue Cross, UnitedHealthcare, etc.)
-   - Mark as "not specified" if: just "yes" or unclear
-4. "booking_intent": 
-   - "yes" = clear confirmation to book
-   - "no" = declining to book
-   - "clarification" = asking questions about booking
-   - "not specified" = anything else
-${therapistSelectionPrompt ? '5. "therapist_selection": Extract 1, 2, or 3 if user selects from options (null otherwise)' : ''}
-
-OUTPUT FORMAT: Valid JSON only. Be strict - prefer "not specified" over guessing.`;
-
-  const prompt = `
-Known Info:
-${knownInfo}
-
-Context:
-${contextMessages}
-
-Current Message: "${userMessage}"
-${bookingPrompt}
-${therapistSelectionPrompt}
-
-Extract JSON:
-{"problem": "...", "schedule": "...", "insurance": "...", "booking_intent": "..."${therapistSelectionPrompt ? ', "therapist_selection": null' : ''}}`;
-
-  // Using models with best free tier limits (gemini-1.5-flash has 1500 RPD)
-  const strategies = [
-    { model: "gemini-1.5-flash", version: "v1beta" },        // Best free tier limits
-    { model: "gemini-1.5-flash-latest", version: "v1beta" }, // Latest 1.5 flash
-    { model: "gemini-flash-latest", version: "v1beta" }      // Generic flash fallback
-  ];
-
-  for (const strategy of strategies) {
-    try {
-      console.log(`[REST-EXTRACT] Attempting ${strategy.model} on ${strategy.version}...`);
-      const url = `https://generativelanguage.googleapis.com/${strategy.version}/models/${strategy.model}:generateContent?key=${apiKey}`;
-      
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          systemInstruction: { parts: [{ text: systemInstruction }] },
-          generationConfig: {
-            responseMimeType: "application/json",
-            temperature: 0.1
-          }
-        })
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        console.error(`[REST-EXTRACT] Error from ${strategy.model} (${strategy.version}):`, data.error?.message);
-        continue;
-      }
-
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (text) {
-        try {
-          return JSON.parse(text) as ExtractedData;
-        } catch (e) {
-             console.error("JSON parse error:", text);
-        }
-      }
-      
-    } catch (err: any) {
-      console.error(`[REST-EXTRACT] Failed ${strategy.model}:`, err.message);
-    }
+  // Filter by general query
+  if (query) {
+    const q = query.toLowerCase();
+    therapists = therapists.filter((t: any) =>
+      (t.name && t.name.toLowerCase().includes(q)) ||
+      (t.bio && t.bio.toLowerCase().includes(q)) ||
+      (t.specialties && JSON.stringify(t.specialties).toLowerCase().includes(q))
+    );
   }
-  
-  // Fallback: Simple pattern matching when all AI models fail
-  console.warn("All Gemini models failed - using fallback pattern matching");
-  return simpleFallbackExtraction(userMessage, inquiry, pendingTherapistMatches);
-}
 
-/**
- * Simple fallback extraction when Gemini API is unavailable
- * Uses basic pattern matching instead of AI
- */
-function simpleFallbackExtraction(userMessage: string, inquiry?: any, pendingTherapistMatches?: any[]): ExtractedData {
-  const lowerMsg = userMessage.toLowerCase();
-  
-  // Extract problem/condition - including emotional keywords
-  let problem = "not specified";
-  
-  // Map emotional keywords to conditions
-  const emotionalMappings: { [key: string]: string } = {
-    'sad': 'depression',
-    'depressed': 'depression',
-    'down': 'depression',
-    'hopeless': 'depression',
-    'worried': 'anxiety',
-    'anxious': 'anxiety',
-    'nervous': 'anxiety',
-    'stressed': 'stress',
-    'overwhelmed': 'stress',
-    'panic': 'panic',
-    'scared': 'anxiety'
+  // If filters yielded no results, return all therapists instead of empty
+  // This ensures users always get therapist options
+  if (therapists.length === 0 && allTherapists.length > 0) {
+    console.log("⚠️ No exact matches found, returning all therapists");
+    therapists = allTherapists;
+  }
+
+  return {
+    count: therapists.length,
+    therapists: therapists.slice(0, 10).map((t: any) => ({
+      id: t.id,
+      name: t.name,
+      bio: t.bio?.substring(0, 150) + "...",
+      specialties: t.specialties,
+      insurance: t.accepted_insurance,
+    })),
   };
-  
-  // Check emotional keywords first
-  for (const [keyword, condition] of Object.entries(emotionalMappings)) {
-    if (lowerMsg.includes(keyword)) {
-      problem = condition;
-      break;
-    }
-  }
-  
-  // Then check for explicit condition names (overrides emotional keywords if found)
-  const conditions = ['anxiety', 'depression', 'stress', 'ptsd', 'ocd', 'bipolar', 'trauma', 
-                      'relationship', 'grief', 'addiction', 'eating disorder'];
-  for (const condition of conditions) {
-    if (lowerMsg.includes(condition)) {
-      problem = condition;
-      break;
-    }
-  }
-  
-  // Extract schedule - detect dates, times, months, days
-  let schedule = "not specified";
-  const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
-                  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 
-                  'october', 'november', 'december'];
-  const times = ['morning', 'afternoon', 'evening', 'noon', 'midnight', 'night', 'am', 'pm'];
-  
-  const hasDay = days.some(d => lowerMsg.includes(d));
-  const hasMonth = months.some(m => lowerMsg.includes(m));
-  const hasTime = times.some(t => {
-      // Avoid matching "am" in "I am" or "pm" in words
-      if (t === 'am' || t === 'pm') {
-          return new RegExp(`\\b\\d+\\s*${t}\\b`).test(lowerMsg);
-      }
-      return lowerMsg.includes(t);
-  });
-  const hasDateNumber = /\d{1,2}(st|nd|rd|th)?/.test(lowerMsg); // Matches 17th, 15, 3rd, etc.
-  const hasTimeFormat = /\d{1,2}:\d{2}/.test(lowerMsg) || /\d{1,2}\s*(am|pm)/.test(lowerMsg); // 3:30 or 3pm
-  
-  if (hasDay || hasTime || hasMonth || hasDateNumber || hasTimeFormat) {
-    schedule = userMessage; // Use full message if it contains any time/date info
-  }
-  
-  // Extract insurance
-  let insurance = "not specified";
-  const insuranceProviders = ['aetna', 'blue cross', 'bluecross', 'cigna', 'united', 
-                               'humana', 'kaiser', 'anthem'];
-  for (const provider of insuranceProviders) {
-    if (lowerMsg.includes(provider)) {
-      insurance = provider;
-      break;
-    }
-  }
-  
-  // Detect booking intent
-  let booking_intent: "yes" | "no" | "clarification" | "not specified" = "not specified";
-  if (inquiry?.matched_therapist_id) {
-    if (/\b(yes|sure|ok|okay|book|confirm|schedule)\b/.test(lowerMsg)) {
-      booking_intent = "yes";
-    } else if (/\b(no|cancel|not|don't)\b/.test(lowerMsg)) {
-      booking_intent = "no";
-    } else if (/\?/.test(userMessage)) {
-      booking_intent = "clarification";
-    }
-  }
-  
-  // Detect therapist selection (if pendingTherapistMatches provided)
-  let therapist_selection: number | undefined = undefined;
-  
-  console.log("=== THERAPIST SELECTION DEBUG ===");
-  console.log("pendingTherapistMatches:", pendingTherapistMatches ? `Array of ${pendingTherapistMatches.length}` : "null/undefined");
-  console.log("inquiry?.matched_therapist_id:", inquiry?.matched_therapist_id || "none");
-  console.log("User message:", userMessage);
-  
-  // Check if we should be looking for therapist selection
-  // NOTE: We check pendingTherapistMatches first, not inquiry.matched_therapist_id
-  // because the frontend might not have updated the inquiry yet
-  if (pendingTherapistMatches && Array.isArray(pendingTherapistMatches) && pendingTherapistMatches.length > 0) {
-    console.log("Checking for therapist selection...");
-    
-    // Try to extract selection number (1, 2, 3, etc.)
-    const numberMatch = lowerMsg.match(/\b([123])\b|first|second|third|one|two|three/);
-    if (numberMatch) {
-      if (numberMatch[1]) {
-        therapist_selection = parseInt(numberMatch[1], 10);
-        console.log(`✓ Found number selection: ${therapist_selection}`);
-      } else if (lowerMsg.includes('first') || lowerMsg.includes('one')) {
-        therapist_selection = 1;
-        console.log(`✓ Found text selection: first/one -> 1`);
-      } else if (lowerMsg.includes('second') || lowerMsg.includes('two')) {
-        therapist_selection = 2;
-        console.log(`✓ Found text selection: second/two -> 2`);
-      } else if (lowerMsg.includes('third') || lowerMsg.includes('three')) {
-        therapist_selection = 3;
-        console.log(`✓ Found text selection: third/three -> 3`);
-      }
-    }
-    
-    // If no number found, try to match therapist name
-    if (!therapist_selection) {
-      console.log(`Trying name matching with ${pendingTherapistMatches.length} therapists...`);
-      for (let i = 0; i < pendingTherapistMatches.length; i++) {
-        const therapist = pendingTherapistMatches[i];
-        const therapistNameLower = therapist.name?.toLowerCase() || '';
-        console.log(`  Checking therapist ${i + 1}: ${therapist.name}`);
-        
-        // Check if user message contains the therapist's name (or significant part of it)
-        if (therapistNameLower && lowerMsg.includes(therapistNameLower)) {
-          therapist_selection = i + 1; // Convert 0-indexed to 1-indexed
-          console.log(`✓ Matched therapist by full name: ${therapist.name} -> selection ${therapist_selection}`);
-          break;
-        }
-        
-        // Also try matching last name only
-        const nameParts = therapistNameLower.split(' ');
-        if (nameParts.length > 1 && lowerMsg.includes(nameParts[nameParts.length - 1])) {
-          therapist_selection = i + 1;
-          console.log(`✓ Matched therapist by last name: ${nameParts[nameParts.length - 1]} -> selection ${therapist_selection}`);
-          break;
-        }
-        
-        // Also try matching first name only
-        if (nameParts.length > 0 && lowerMsg.includes(nameParts[0])) {
-          therapist_selection = i + 1;
-          console.log(`✓ Matched therapist by first name: ${nameParts[0]} -> selection ${therapist_selection}`);
-          break;
-        }
-      }
-    }
-    
-    if (!therapist_selection) {
-      console.log("⚠ No therapist selection detected");
-    }
+}
+
+async function toolGetTherapistDetails(supabase: any, args: any) {
+  const { therapistId, therapistName } = args;
+
+  let query = supabase
+    .from("therapists")
+    .select("id, name, bio, specialties, accepted_insurance, is_active");
+
+  if (therapistId) {
+    query = query.eq("id", therapistId);
+  } else if (therapistName) {
+    query = query.ilike("name", `%${therapistName}%`);
   } else {
-    console.log("Skipping therapist selection check (no pending matches or already matched)");
+    return { error: "Need therapist ID or name" };
   }
-  console.log("=================================");
-  
-  return { problem, schedule, insurance, booking_intent, therapist_selection };
+
+  const { data, error } = await query.single();
+
+  if (error || !data) {
+    return { found: false, message: "Therapist not found" };
+  }
+
+  return {
+    found: true,
+    therapist: {
+      id: data.id,
+      name: data.name,
+      bio: data.bio,
+      specialties: data.specialties,
+      acceptedInsurance: data.accepted_insurance,
+    },
+  };
+}
+
+async function toolCheckAvailableSlots(
+  supabase: any,
+  args: any,
+  timeZone: string,
+) {
+  const { therapistId, date } = args;
+
+  console.log("=== CHECK AVAILABILITY ===");
+  console.log("Therapist ID:", therapistId);
+  console.log("Date:", date);
+
+  // Parse date
+  let targetDate = parseFlexibleDate(date);
+
+  // Get appointments for that day
+  const dayStart = new Date(targetDate);
+  dayStart.setHours(9, 0, 0, 0);
+  const dayEnd = new Date(targetDate);
+  dayEnd.setHours(17, 0, 0, 0); // Changed to 5 PM to match working hours
+
+  const { data: appointments } = await supabase
+    .from("appointments")
+    .select("start_time, end_time")
+    .eq("therapist_id", therapistId)
+    .gte("start_time", dayStart.toISOString())
+    .lte("end_time", dayEnd.toISOString());
+
+  // Generate hourly slots from 9 AM to 5 PM (last slot at 4 PM for 1-hour session ending at 5 PM)
+  const slots: any[] = [];
+  for (let hour = 9; hour < 17; hour++) {
+    const slotStart = new Date(targetDate);
+    slotStart.setHours(hour, 0, 0, 0);
+    const slotEnd = new Date(targetDate);
+    slotEnd.setHours(hour + 1, 0, 0, 0);
+
+    const isBooked = (appointments || []).some((apt: any) => {
+      const aptStart = new Date(apt.start_time);
+      const aptEnd = new Date(apt.end_time);
+      return slotStart < aptEnd && slotEnd > aptStart;
+    });
+
+    const isPast = slotStart < new Date();
+
+    if (!isBooked && !isPast) {
+      slots.push({
+        startTime: slotStart.toISOString(),
+        endTime: slotEnd.toISOString(),
+        displayTime: slotStart.toLocaleTimeString("en-US", {
+          timeZone,
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        }),
+      });
+    }
+  }
+
+  console.log("Found slots:", slots.length);
+
+  return {
+    therapistId: therapistId, // Include for easy booking
+    date: targetDate.toLocaleDateString("en-US", {
+      timeZone,
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    }),
+    availableSlots: slots,
+    count: slots.length,
+    message: slots.length > 0
+      ? `Found ${slots.length} available slots`
+      : "No slots available that day",
+  };
+}
+
+async function toolBookAppointment(
+  supabase: any,
+  args: any,
+  inquiry: any,
+  authHeader: string,
+) {
+  const { therapistId, startTime, endTime, problem } = args;
+
+  // DETAILED LOGGING FOR DEBUGGING
+  console.log("=== BOOKING ATTEMPT ===");
+  console.log("Args received:", JSON.stringify(args));
+  console.log("Therapist ID:", therapistId);
+  console.log("Start Time:", startTime);
+  console.log("End Time:", endTime);
+  console.log("Inquiry:", inquiry?.id);
+
+  // Validate required fields
+  if (!therapistId) {
+    console.error("ERROR: Missing therapistId");
+    return { success: false, error: "Missing therapist ID" };
+  }
+  if (!startTime) {
+    console.error("ERROR: Missing startTime");
+    return { success: false, error: "Missing start time" };
+  }
+  if (!endTime) {
+    console.error("ERROR: Missing endTime - will calculate");
+    // Calculate end time if not provided (1 hour default)
+  }
+  if (!inquiry?.id) {
+    console.error("ERROR: Missing inquiry");
+    return { success: false, error: "Missing inquiry - session error" };
+  }
+
+  // Validate time
+  const start = new Date(startTime);
+  const now = new Date();
+
+  console.log("Parsed start time:", start.toISOString());
+  console.log("Current time:", now.toISOString());
+
+  if (isNaN(start.getTime())) {
+    console.error("ERROR: Invalid start time format");
+    return { success: false, error: "Invalid time format" };
+  }
+
+  if (start < now) {
+    console.error("ERROR: Time is in the past");
+    return { success: false, error: "Can't book appointments in the past" };
+  }
+
+  // Calculate end time if not provided
+  const end = endTime
+    ? new Date(endTime)
+    : new Date(start.getTime() + 60 * 60 * 1000);
+  const endTimeStr = endTime || end.toISOString();
+
+  // Check availability (double-booking prevention)
+  console.log("Checking for conflicts...");
+  const { data: conflicts, error: conflictError } = await supabase
+    .from("appointments")
+    .select("id")
+    .eq("therapist_id", therapistId)
+    .lt("start_time", endTimeStr)
+    .gt("end_time", startTime);
+
+  if (conflictError) {
+    console.error("Conflict check error:", conflictError);
+  }
+
+  if (conflicts && conflicts.length > 0) {
+    console.error("ERROR: Time slot has conflicts:", conflicts);
+    return { success: false, error: "Time slot is already booked" };
+  }
+
+  console.log("No conflicts found, proceeding to book...");
+
+  // Create appointment
+  const insertData = {
+    inquiry_id: inquiry.id,
+    therapist_id: therapistId,
+    start_time: startTime,
+    end_time: endTimeStr,
+    status: "scheduled",
+  };
+  console.log("Inserting:", JSON.stringify(insertData));
+
+  const { data: appointment, error } = await supabase
+    .from("appointments")
+    .insert(insertData)
+    .select(`
+      id,
+      start_time,
+      end_time,
+      therapists (id, name)
+    `)
+    .single();
+
+  if (error) {
+    console.error("=== BOOKING FAILED ===");
+    console.error("Error code:", error.code);
+    console.error("Error message:", error.message);
+    console.error("Error details:", error.details);
+    console.error("Full error:", JSON.stringify(error));
+    return { success: false, error: `Failed to book: ${error.message}` };
+  }
+
+  console.log("=== BOOKING SUCCESS ===");
+  console.log("Appointment created:", appointment?.id);
+
+  // Update inquiry (DB schema: problem_description, extracted_specialty, matched_therapist_id, status)
+  if (problem) {
+    await supabase
+      .from("inquiries")
+      .update({
+        extracted_specialty: problem,
+        problem_description: problem,
+        matched_therapist_id: therapistId,
+        status: "scheduled",
+      })
+      .eq("id", inquiry.id);
+  }
+
+  return {
+    success: true,
+    message: "Appointment booked successfully!",
+    appointment: {
+      id: appointment.id,
+      therapistName: appointment.therapists?.name,
+      startTime: appointment.start_time,
+      endTime: appointment.end_time,
+    },
+  };
+}
+
+async function toolViewMyAppointments(
+  supabase: any,
+  patientId: string,
+  args: any,
+  timeZone: string,
+) {
+  const status = args.status || "upcoming";
+  const now = new Date().toISOString();
+
+  // Get inquiries for this patient
+  const { data: inquiries } = await supabase
+    .from("inquiries")
+    .select("id")
+    .eq("patient_identifier", patientId);
+
+  if (!inquiries || inquiries.length === 0) {
+    return { count: 0, appointments: [], message: "No appointments found" };
+  }
+
+  const inquiryIds = inquiries.map((i: any) => i.id);
+
+  // Query appointments
+  let query = supabase
+    .from("appointments")
+    .select(`
+      id,
+      start_time,
+      end_time,
+      status,
+      therapists (id, name, specialties)
+    `)
+    .in("inquiry_id", inquiryIds)
+    .order("start_time", { ascending: true });
+
+  if (status === "upcoming") {
+    query = query.gte("start_time", now);
+  } else if (status === "past") {
+    query = query.lt("start_time", now);
+  }
+
+  const { data: appointments } = await query;
+
+  const formatted = (appointments || []).map((apt: any, i: number) => ({
+    number: i + 1,
+    id: apt.id,
+    therapistName: apt.therapists?.name || "Unknown",
+    therapistId: apt.therapists?.id,
+    startTime: new Date(apt.start_time).toLocaleString("en-US", { timeZone }),
+    endTime: new Date(apt.end_time).toLocaleString("en-US", { timeZone }),
+    startTimeISO: apt.start_time,
+    status: apt.status,
+  }));
+
+  return {
+    count: formatted.length,
+    appointments: formatted,
+    message: formatted.length > 0
+      ? `You have ${formatted.length} ${status} appointment(s)`
+      : `No ${status} appointments`,
+  };
+}
+
+async function toolCancelAppointment(
+  supabase: any,
+  args: any,
+  authHeader: string,
+) {
+  const { appointmentId } = args;
+
+  if (!appointmentId) {
+    return {
+      success: false,
+      error: "Please specify which appointment to cancel",
+    };
+  }
+
+  // Fetch appointment
+  const { data: appointment, error: fetchError } = await supabase
+    .from("appointments")
+    .select("id, start_time, therapists (name)")
+    .eq("id", appointmentId)
+    .single();
+
+  if (fetchError || !appointment) {
+    return { success: false, error: "Appointment not found" };
+  }
+
+  // Cancel it
+  const { error: cancelError } = await supabase
+    .from("appointments")
+    .update({ status: "cancelled" })
+    .eq("id", appointmentId);
+
+  if (cancelError) {
+    return { success: false, error: "Failed to cancel appointment" };
+  }
+
+  return {
+    success: true,
+    message:
+      `Appointment with ${appointment.therapists?.name} has been cancelled`,
+    cancelled: {
+      id: appointment.id,
+      therapistName: appointment.therapists?.name,
+      wasScheduledFor: appointment.start_time,
+    },
+  };
+}
+
+async function toolRescheduleAppointment(
+  supabase: any,
+  args: any,
+  timeZone: string,
+) {
+  const { appointmentId, newStartTime, newEndTime } = args;
+
+  if (!appointmentId) {
+    return {
+      success: false,
+      error: "Please specify which appointment to reschedule",
+    };
+  }
+
+  if (!newStartTime || !newEndTime) {
+    return { success: false, error: "Please provide the new date and time" };
+  }
+
+  // Validate new time
+  const newStart = new Date(newStartTime);
+  const now = new Date();
+
+  if (newStart < now) {
+    return { success: false, error: "Can't reschedule to the past" };
+  }
+
+  const hour = newStart.getHours();
+  if (hour < 9 || hour >= 18) {
+    return { success: false, error: "Outside working hours (9 AM - 6 PM)" };
+  }
+
+  // Fetch appointment
+  const { data: appointment, error: fetchError } = await supabase
+    .from("appointments")
+    .select("id, therapist_id, start_time, therapists (name)")
+    .eq("id", appointmentId)
+    .single();
+
+  if (fetchError || !appointment) {
+    return { success: false, error: "Appointment not found" };
+  }
+
+  // Check for conflicts
+  const { data: conflicts } = await supabase
+    .from("appointments")
+    .select("id")
+    .eq("therapist_id", appointment.therapist_id)
+    .neq("id", appointmentId)
+    .lt("start_time", newEndTime)
+    .gt("end_time", newStartTime);
+
+  if (conflicts && conflicts.length > 0) {
+    return { success: false, error: "That time slot is already booked" };
+  }
+
+  // Update appointment
+  const { error: updateError } = await supabase
+    .from("appointments")
+    .update({
+      start_time: newStartTime,
+      end_time: newEndTime,
+    })
+    .eq("id", appointmentId);
+
+  if (updateError) {
+    return { success: false, error: "Failed to reschedule" };
+  }
+
+  return {
+    success: true,
+    message: `Appointment rescheduled successfully`,
+    rescheduled: {
+      id: appointment.id,
+      therapistName: appointment.therapists?.name,
+      oldTime: new Date(appointment.start_time).toLocaleString("en-US", {
+        timeZone,
+      }),
+      newTime: new Date(newStartTime).toLocaleString("en-US", { timeZone }),
+    },
+  };
+}
+
+function toolListInsurance() {
+  return {
+    insuranceProviders: [
+      "Aetna",
+      "Blue Cross Blue Shield",
+      "Cigna",
+      "UnitedHealthcare",
+      "Humana",
+      "Kaiser Permanente",
+      "Medicare",
+      "Medicaid",
+    ],
+    message: "We accept 8 major insurance providers",
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RULE-BASED CONVERSATION (Fallback when AI is unavailable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function ruleBasedConversation({
+  supabaseClient,
+  userMessage,
+  context,
+}: any) {
+  const msg = userMessage.toLowerCase();
+
+  // =====================================================
+  // PRIORITY 1: CRISIS/SUICIDE DETECTION - Always check first!
+  // =====================================================
+  const crisisKeywords = [
+    "suicide",
+    "suicidal",
+    "kill myself",
+    "end my life",
+    "want to die",
+    "don't want to live",
+    "hurt myself",
+    "self harm",
+    "self-harm",
+    "no reason to live",
+    "better off dead",
+    "ending it all",
+  ];
+
+  const isCrisis = crisisKeywords.some((k) => msg.includes(k));
+
+  if (isCrisis) {
+    return {
+      success: true,
+      message:
+        `I'm really glad you reached out. What you're feeling is serious, and you deserve immediate support.
+
+PLEASE REACH OUT NOW:
+
+- India: iCall - 9152987821
+- India: Vandrevala Foundation - 1860-2662-345
+- India: AASRA - 91-22-27546669
+- US: National Suicide Prevention Lifeline - 988
+- International: findahelpline.com
+
+If you're in immediate danger, please call your local emergency number (112 in India, 911 in US).
+
+You matter, and help is available right now. Would you like me to help you find a therapist for ongoing support once you're feeling safer?`,
+    };
+  }
+
+  // =====================================================
+  // PRIORITY 2: INSURANCE QUESTIONS
+  // =====================================================
+  if (
+    msg.includes("insurance") || msg.includes("accept") ||
+    msg.includes("cover") || msg.includes("payment")
+  ) {
+    return {
+      success: true,
+      message: `We accept these insurance providers:
+
+- Blue Cross Blue Shield
+- Aetna
+- Cigna  
+- UnitedHealthcare
+- Humana
+- Kaiser Permanente
+- Medicare
+- Medicaid
+
+Which insurance do you have? I can help find therapists who accept it!
+
+Or type "show therapists" to see all our therapists.`,
+    };
+  }
+
+  // =====================================================
+  // PRIORITY 3: THERAPIST LIST
+  // =====================================================
+  if (
+    msg.includes("therapist") || msg.includes("show all") ||
+    msg.includes("list") || msg.includes("doctor")
+  ) {
+    const { data: therapists } = await supabaseClient
+      .from("therapists")
+      .select("id, name, specialties, accepted_insurance")
+      .eq("is_active", true)
+      .limit(10);
+
+    if (!therapists || therapists.length === 0) {
+      return {
+        success: true,
+        message:
+          "I couldn't find any therapists right now. Please try again in a moment.",
+      };
+    }
+
+    let response = "Here are our available therapists:\n\n";
+    therapists.forEach((t: any, i: number) => {
+      const specs = Array.isArray(t.specialties)
+        ? t.specialties.slice(0, 3).join(", ")
+        : "General";
+      response += `${i + 1}. ${t.name}\n   Specialties: ${specs}\n\n`;
+    });
+    response +=
+      "Which therapist interests you? Or tell me what you need help with!";
+
+    return { success: true, message: response };
+  }
+
+  // =====================================================
+  // PRIORITY 4: MENTAL HEALTH EDUCATION
+  // =====================================================
+  if (
+    msg.includes("what is") || msg.includes("explain") ||
+    msg.includes("mental health") ||
+    msg.includes("about anxiety") || msg.includes("about depression") ||
+    msg.includes("about therapy")
+  ) {
+    if (msg.includes("anxiety")) {
+      return {
+        success: true,
+        message:
+          `Anxiety is your body's natural stress response. It's normal to feel anxious sometimes, but when anxiety becomes overwhelming or constant, therapy can help.
+
+Common signs:
+- Excessive worry
+- Racing thoughts
+- Physical symptoms (racing heart, sweating)
+- Difficulty sleeping
+- Avoiding situations
+
+Many of our therapists specialize in anxiety treatment. Would you like me to find one for you?`,
+      };
+    }
+
+    if (msg.includes("depression")) {
+      return {
+        success: true,
+        message:
+          `Depression is more than just feeling sad - it's a treatable condition that affects how you feel, think, and handle daily activities.
+
+Common signs:
+- Persistent sadness or emptiness
+- Loss of interest in activities you used to enjoy
+- Changes in sleep or appetite
+- Difficulty concentrating
+- Feelings of worthlessness
+
+Therapy is very effective for depression. Would you like me to find a therapist who specializes in this?`,
+      };
+    }
+
+    if (msg.includes("therapy") || msg.includes("counseling")) {
+      return {
+        success: true,
+        message:
+          `Therapy (or counseling) is a safe space to talk with a trained professional about what you're going through.
+
+What happens in therapy:
+- You share your thoughts and feelings
+- The therapist helps you understand patterns
+- Together you develop coping strategies
+- Sessions are confidential
+- Typically 45-60 minutes weekly
+
+Types we offer:
+- Individual therapy (1-on-1)
+- Couples therapy
+- Trauma-focused therapy (EMDR)
+
+Would you like to see our therapists and book a session?`,
+      };
+    }
+
+    // General mental health
+    return {
+      success: true,
+      message:
+        `Mental health is just as important as physical health. It includes your emotional, psychological, and social well-being.
+
+Common conditions we treat:
+- Anxiety and panic
+- Depression
+- Trauma and PTSD
+- Relationship issues
+- Work stress and burnout
+- Grief and loss
+- Life transitions
+
+Taking care of your mental health is a sign of strength. Would you like me to help you find a therapist?`,
+    };
+  }
+
+  // =====================================================
+  // PRIORITY 5: BOOKING INTENT
+  // =====================================================
+  if (
+    msg.includes("book") || msg.includes("appointment") ||
+    msg.includes("schedule") || msg.includes("see someone")
+  ) {
+    return {
+      success: true,
+      message: `I'd love to help you book an appointment!
+
+To find the right therapist, tell me:
+1. What you're seeking help with (anxiety, depression, stress, etc.)
+2. Your insurance provider (optional)
+
+Or you can:
+- Type "show therapists" to browse all
+- Type "show insurance" to see accepted plans
+
+What would you like to do?`,
+    };
+  }
+
+  // =====================================================
+  // PRIORITY 6: EMOTIONAL SUPPORT (Not booking yet)
+  // =====================================================
+  const emotionalWords = [
+    "anxious",
+    "anxiety",
+    "depressed",
+    "depression",
+    "sad",
+    "stressed",
+    "overwhelmed",
+    "struggling",
+    "grief",
+    "loss",
+    "tired",
+    "exhausted",
+    "burnout",
+    "lonely",
+    "scared",
+    "worried",
+    "hopeless",
+  ];
+
+  const hasEmotionalContent = emotionalWords.some((e) => msg.includes(e));
+
+  if (hasEmotionalContent) {
+    return {
+      success: true,
+      message:
+        `I hear you, and I'm glad you're reaching out. What you're feeling is valid.
+
+Talking to a professional can really help. Our therapists specialize in:
+- Anxiety and stress
+- Depression
+- Burnout and overwhelm
+- Grief and loss
+- Life challenges
+
+Would you like me to find a therapist who can help with what you're experiencing?
+
+Just say "yes" or "show therapists" to see our team.`,
+    };
+  }
+
+  // =====================================================
+  // PRIORITY 7: HELP/MENU REQUEST
+  // =====================================================
+  if (
+    msg.includes("help") || msg.includes("menu") || msg.includes("options") ||
+    msg.includes("what can you do")
+  ) {
+    return {
+      success: true,
+      message:
+        `I'm Kai, your therapy appointment assistant. Here's what I can help with:
+
+1. "Show therapists" - Browse our team
+2. "Show insurance" - See accepted insurance
+3. "Book appointment" - Schedule a session
+4. "What is anxiety?" - Learn about mental health
+5. "What is therapy?" - Understand how therapy works
+
+If you're in crisis and need immediate help, just tell me and I'll provide emergency resources.
+
+What would you like to do?`,
+    };
+  }
+
+  // =====================================================
+  // DEFAULT: Friendly fallback with options
+  // =====================================================
+  return {
+    success: true,
+    message: `Hi! I'm Kai, your appointment assistant.
+
+I can help you with:
+- Find a therapist (say "show therapists")
+- Learn about insurance we accept (say "show insurance")  
+- Book an appointment (say "book appointment")
+- Understand mental health topics (say "what is anxiety?" or "what is therapy?")
+- Get crisis support if you need it
+
+What would you like to do today?`,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🛠️ UTILITY FUNCTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getOrCreateInquiry(supabase: any, patientId: string) {
+  // Try to find existing inquiry
+  const { data: existing } = await supabase
+    .from("inquiries")
+    .select("*")
+    .eq("patient_identifier", patientId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (existing) {
+    return existing;
+  }
+
+  // Create new inquiry
+  const { data: newInquiry, error } = await supabase
+    .from("inquiries")
+    .insert({
+      patient_identifier: patientId,
+      status: "pending",
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error("Error creating inquiry:", error);
+    throw new Error("Failed to create inquiry");
+  }
+
+  return newInquiry;
+}
+
+function parseFlexibleDate(dateStr: string): Date {
+  const str = dateStr.toLowerCase();
+  const date = new Date();
+
+  if (str === "today") {
+    return date;
+  }
+
+  if (str === "tomorrow") {
+    date.setDate(date.getDate() + 1);
+    return date;
+  }
+
+  if (str.includes("next week")) {
+    date.setDate(date.getDate() + 7);
+    return date;
+  }
+
+  if (str.includes("monday")) {
+    const daysUntilMonday = (8 - date.getDay()) % 7 || 7;
+    date.setDate(date.getDate() + daysUntilMonday);
+    return date;
+  }
+
+  if (str.includes("tuesday")) {
+    const daysUntilTuesday = (9 - date.getDay()) % 7 || 7;
+    date.setDate(date.getDate() + daysUntilTuesday);
+    return date;
+  }
+
+  // Try ISO date
+  const parsed = new Date(dateStr);
+  if (!isNaN(parsed.getTime())) {
+    return parsed;
+  }
+
+  // Default to tomorrow
+  date.setDate(date.getDate() + 1);
+  return date;
+}
+
+function jsonResponse(data: any, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
 }
