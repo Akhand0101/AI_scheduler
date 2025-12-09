@@ -139,16 +139,27 @@ export default function AppointmentList() {
                       <IconButton
                         onClick={() => {
                           if (a.google_calendar_event_id && a.start_time) {
-                            // Extract date for Google Calendar URL
+                            // Try to open the specific event
+                            // Google Calendar event URL format: calendar.google.com/calendar/event?eid=xxxxx
+                            // But since we don't have the encoded event ID, open the day view
                             const eventDate = new Date(a.start_time);
-                            const dateStr = eventDate.toISOString().split('T')[0].replace(/-/g, '');
-                            // Open Google Calendar at this date
-                            const url = `https://calendar.google.com/calendar/u/0/r/day/${dateStr}`;
-                            window.open(url, "_blank");
+                            const year = eventDate.getFullYear();
+                            const month = String(eventDate.getMonth() + 1).padStart(2, '0');
+                            const day = String(eventDate.getDate()).padStart(2, '0');
+                            // Correct format for Google Calendar day view: YYYY/MM/DD
+                            const url = `https://calendar.google.com/calendar/u/0/r/day/${year}/${month}/${day}`;
+                            window.open(url, "_blank", "noopener,noreferrer");
+                          } else if (a.start_time) {
+                            // No event ID but has date - open calendar at that day
+                            const eventDate = new Date(a.start_time);
+                            const year = eventDate.getFullYear();
+                            const month = String(eventDate.getMonth() + 1).padStart(2, '0');
+                            const day = String(eventDate.getDate()).padStart(2, '0');
+                            const url = `https://calendar.google.com/calendar/u/0/r/day/${year}/${month}/${day}`;
+                            window.open(url, "_blank", "noopener,noreferrer");
                           } else {
-                            // Fallback to main calendar if sync failed or ID missing
-                            alert("This appointment doesn't have a linked Google Calendar event ID. Opening your main calendar.");
-                            window.open("https://calendar.google.com", "_blank");
+                            // Fallback to main calendar
+                            window.open("https://calendar.google.com", "_blank", "noopener,noreferrer");
                           }
                         }}
                         size="small"
