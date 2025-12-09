@@ -377,10 +377,10 @@ async function aiConversation({
   let finalResponse = "";
   let bookingResult: any = null;
   let appointmentData: any = null;
+  let lastToolResults: any[] = []; // Track tool results for fallback
 
-  // FREE TIER OPTIMIZED: Reduced to 2 turns max (1 for tool call, 1 for response)
-  // This prevents burning quota on complex multi-turn conversations
-  const MAX_TURNS = 2;
+  // Allow up to 4 turns: enough for tool call -> response -> tool call -> response
+  const MAX_TURNS = 4;
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     try {
@@ -440,6 +440,9 @@ async function aiConversation({
               authHeader,
             });
 
+            // Track for fallback
+            lastToolResults.push({ tool: name, result });
+
             // Track booking results
             if (name === "book_appointment" && result.success) {
               bookingResult = result;
@@ -472,9 +475,43 @@ async function aiConversation({
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // SMART FALLBACK: Generate response from tool results if AI didn't respond
+  // ─────────────────────────────────────────────────────────────────────────────
+  if (!finalResponse && lastToolResults.length > 0) {
+    console.log("⚠️ AI didn't generate text, using tool results for response");
+
+    for (const { tool, result } of lastToolResults) {
+      if (tool === "check_available_slots" && result.availableSlots) {
+        const slots = result.availableSlots.slice(0, 5);
+        const slotList = slots.map((s: any, i: number) =>
+          `${i + 1}. ${s.displayTime}`
+        ).join("\n");
+
+        finalResponse =
+          `I found ${result.count} available times on ${result.date}:\n\n${slotList}\n\nWhich time works best for you?`;
+      } else if (tool === "search_therapists" && result.therapists) {
+        const therapists = result.therapists.slice(0, 3);
+        const list = therapists.map((t: any, i: number) => {
+          const specs = Array.isArray(t.specialties)
+            ? t.specialties.slice(0, 2).join(", ")
+            : "General";
+          return `${i + 1}. **${t.name}** - Specializes in ${specs}`;
+        }).join("\n\n");
+
+        finalResponse =
+          `Here are some therapists who might be a good fit:\n\n${list}\n\nWhich one would you like to learn more about?`;
+      } else if (tool === "book_appointment" && result.success) {
+        finalResponse = result.confirmationMessage ||
+          `Your appointment has been booked successfully! ${result.message}`;
+      }
+    }
+  }
+
   return {
     success: true,
-    message: finalResponse || "I'm here to help! What would you like to do?",
+    message: finalResponse ||
+      "I'm here to help you schedule an appointment. Could you tell me which therapist you'd like to see, or would you like me to show you our available therapists?",
     aiResponse: finalResponse,
     nextAction: bookingResult ? "booked" : "awaiting-info",
     inquiryId: inquiry.id,
