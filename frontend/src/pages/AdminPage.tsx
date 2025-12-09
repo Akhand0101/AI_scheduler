@@ -10,7 +10,6 @@ import {
   Paper, 
   Container, 
   Chip,
-  Grid,
   alpha
 } from "@mui/material";
 import { 
@@ -248,8 +247,8 @@ export default function AdminPage() {
           }
         }}
       >
-        <Grid container spacing={3} alignItems="center">
-          <Grid item xs={12} md={8}>
+        <Box sx={{ display: 'flex', flexDirection: { xs: 'column', md: 'row' }, gap: 3, alignItems: { xs: 'flex-start', md: 'center' } }}>
+          <Box sx={{ flex: { xs: '1 1 100%', md: '1 1 66%' } }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1 }}>
               <Box
                 sx={{
@@ -290,8 +289,8 @@ export default function AdminPage() {
                 </Typography>
               </Box>
             </Box>
-          </Grid>
-          <Grid item xs={12} md={4} sx={{ textAlign: { xs: 'left', md: 'right' } }}>
+          </Box>
+          <Box sx={{ flex: { xs: '1 1 100%', md: '0 0 auto' }, textAlign: { xs: 'left', md: 'right' } }}>
             {therapist?.google_refresh_token ? (
               <Chip
                 label="Connected"
@@ -322,66 +321,62 @@ export default function AdminPage() {
                 Connect Calendar
               </Button>
             )}
-          </Grid>
-        </Grid>
+          </Box>
+        </Box>
       </Paper>
 
       {/* Data Tables */}
-      <Grid container spacing={3}>
-        <Grid item xs={12}>
-          <Paper 
-            elevation={2} 
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <Paper 
+          elevation={2} 
+          sx={{ 
+            p: 4,
+            borderRadius: 3,
+            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            '&:hover': {
+              boxShadow: '0px 8px 20px rgba(60, 64, 67, 0.15)',
+            }
+          }}
+        >
+          <Typography 
+            variant="h5" 
+            gutterBottom 
             sx={{ 
-              p: 4,
-              borderRadius: 3,
-              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-              '&:hover': {
-                boxShadow: '0px 8px 20px rgba(60, 64, 67, 0.15)',
-              }
+              color: 'primary.main',
+              fontWeight: 600,
+              mb: 3,
             }}
           >
-            <Typography 
-              variant="h5" 
-              gutterBottom 
-              sx={{ 
-                color: 'primary.main',
-                fontWeight: 600,
-                mb: 3,
-              }}
-            >
-              Patient Inquiries
-            </Typography>
-            <InquiryList />
-          </Paper>
-        </Grid>
+            Patient Inquiries
+          </Typography>
+          <InquiryList />
+        </Paper>
 
-        <Grid item xs={12}>
-          <Paper 
-            elevation={2} 
+        <Paper 
+          elevation={2} 
+          sx={{ 
+            p: 4,
+            borderRadius: 3,
+            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            '&:hover': {
+              boxShadow: '0px 8px 20px rgba(60, 64, 67, 0.15)',
+            }
+          }}
+        >
+          <Typography 
+            variant="h5" 
+            gutterBottom 
             sx={{ 
-              p: 4,
-              borderRadius: 3,
-              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-              '&:hover': {
-                boxShadow: '0px 8px 20px rgba(60, 64, 67, 0.15)',
-              }
+              color: 'primary.main',
+              fontWeight: 600,
+              mb: 3,
             }}
           >
-            <Typography 
-              variant="h5" 
-              gutterBottom 
-              sx={{ 
-                color: 'primary.main',
-                fontWeight: 600,
-                mb: 3,
-              }}
-            >
-              Scheduled Appointments
-            </Typography>
-            <AppointmentList />
-          </Paper>
-        </Grid>
-      </Grid>
+            Scheduled Appointments
+          </Typography>
+          <AppointmentList />
+        </Paper>
+      </Box>
     </Box>
   );
 }
