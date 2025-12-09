@@ -404,7 +404,7 @@ async function aiConversation({
 
   // FREE TIER OPTIMIZED: Use gemini-2.0-flash-001 which is available on v1beta
   // See: https://ai.google.dev/gemini-api/docs/models/gemini
-  const PRIMARY_MODEL = "gemini-2.0-flash-001";
+  const PRIMARY_MODEL = "gemini-2.5-flash";
 
   let finalResponse = "";
   let bookingResult: any = null;
@@ -1173,9 +1173,13 @@ Or type "show therapists" to see all our therapists.`,
   // =====================================================
   // PRIORITY 3: THERAPIST LIST
   // =====================================================
+  // Only trigger for therapist list if NOT asking about insurance
+  const isInsuranceRelated = msg.includes("insurance");
   if (
-    msg.includes("therapist") || msg.includes("show all") ||
-    msg.includes("list") || msg.includes("doctor")
+    !isInsuranceRelated && (
+      msg.includes("therapist") || msg.includes("show all") ||
+      msg.includes("list") || msg.includes("doctor")
+    )
   ) {
     const { data: therapists } = await supabaseClient
       .from("therapists")
