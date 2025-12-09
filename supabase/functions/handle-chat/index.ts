@@ -1384,20 +1384,124 @@ What would you like to do?`,
   }
 
   // =====================================================
+  // PRIORITY 8: THERAPIST SELECTION / NAME MENTIONED
+  // =====================================================
+  // Try to find if user mentioned a therapist name
+  const { data: allTherapists } = await supabaseClient
+    .from("therapists")
+    .select("id, name, specialties")
+    .eq("is_active", true);
+
+  if (allTherapists && allTherapists.length > 0) {
+    // Check if user mentioned any therapist name (check first name)
+    const mentionedTherapist = allTherapists.find((t: any) => {
+      const firstName = t.name.split(" ")[0].toLowerCase();
+      const lastName = t.name.split(" ").pop()?.toLowerCase() || "";
+      return msg.includes(firstName) || msg.includes(lastName) ||
+        msg.includes(t.name.toLowerCase());
+    });
+
+    if (mentionedTherapist) {
+      const specs = Array.isArray(mentionedTherapist.specialties)
+        ? mentionedTherapist.specialties.slice(0, 3).join(", ")
+        : "various areas";
+
+      return {
+        success: true,
+        message:
+          `Great choice! ${mentionedTherapist.name} specializes in ${specs}.
+
+I'd love to book you with them! When would work for you?
+
+You can say:
+- "Tomorrow" or "next Monday"
+- A specific date like "December 15"
+- "Check availability" to see open slots
+
+What works best for you?`,
+        therapistId: mentionedTherapist.id,
+        therapistName: mentionedTherapist.name,
+        nextAction: "check-availability",
+      };
+    }
+  }
+
+  // =====================================================
+  // PRIORITY 9: DATE/TIME MENTIONED (wants to book)
+  // =====================================================
+  const dateWords = [
+    "today",
+    "tomorrow",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "next week",
+    "morning",
+    "afternoon",
+    "evening",
+    "pm",
+    "am",
+  ];
+  const hasDateMention = dateWords.some((d) => msg.includes(d));
+
+  if (hasDateMention) {
+    return {
+      success: true,
+      message: `I'd be happy to help you book for that time!
+
+To find the right slot, I need to know which therapist you'd like to see.
+
+Would you like me to:
+- Show all our therapists? (say "show therapists")
+- Help you find one based on your needs? (tell me what you're dealing with)
+
+What would you like to do?`,
+    };
+  }
+
+  // =====================================================
+  // PRIORITY 10: YES/CONFIRM RESPONSES
+  // =====================================================
+  if (
+    msg === "yes" || msg === "yeah" || msg === "ok" || msg === "sure" ||
+    msg === "please"
+  ) {
+    return {
+      success: true,
+      message: `Perfect! Let me help you find a therapist.
+
+What would you like help with? For example:
+- Anxiety or stress
+- Depression
+- Relationship issues
+- Life transitions
+
+Or just say "show therapists" to see our full team!`,
+    };
+  }
+
+  // =====================================================
   // DEFAULT: Friendly fallback with options
   // =====================================================
   return {
     success: true,
-    message: `Hi! I'm Kai, your appointment assistant.
+    message: `I want to make sure I help you correctly!
 
-I can help you with:
-- Find a therapist (say "show therapists")
-- Learn about insurance we accept (say "show insurance")  
-- Book an appointment (say "book appointment")
-- Understand mental health topics (say "what is anxiety?" or "what is therapy?")
-- Get crisis support if you need it
+Here's what I can do:
+- **Show therapists** - Browse our team
+- **Show insurance** - See accepted plans
+- **Book appointment** - Schedule a session
 
-What would you like to do today?`,
+You can also tell me:
+- What you're looking for help with
+- A therapist's name if you know who you want to see
+- When you'd like to schedule
+
+What would you like to do?`,
   };
 }
 
