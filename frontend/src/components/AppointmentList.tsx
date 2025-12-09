@@ -138,29 +138,18 @@ export default function AppointmentList() {
                     <Tooltip title="View Calendar Event">
                       <IconButton
                         onClick={() => {
-                          if (a.google_calendar_event_id && a.start_time) {
-                            // Try to open the specific event
-                            // Google Calendar event URL format: calendar.google.com/calendar/event?eid=xxxxx
-                            // But since we don't have the encoded event ID, open the day view
+                          let url = "https://calendar.google.com";
+                          
+                          if (a.start_time) {
                             const eventDate = new Date(a.start_time);
                             const year = eventDate.getFullYear();
                             const month = String(eventDate.getMonth() + 1).padStart(2, '0');
                             const day = String(eventDate.getDate()).padStart(2, '0');
-                            // Correct format for Google Calendar day view: YYYY/MM/DD
-                            const url = `https://calendar.google.com/calendar/u/0/r/day/${year}/${month}/${day}`;
-                            window.open(url, "_blank", "noopener,noreferrer");
-                          } else if (a.start_time) {
-                            // No event ID but has date - open calendar at that day
-                            const eventDate = new Date(a.start_time);
-                            const year = eventDate.getFullYear();
-                            const month = String(eventDate.getMonth() + 1).padStart(2, '0');
-                            const day = String(eventDate.getDate()).padStart(2, '0');
-                            const url = `https://calendar.google.com/calendar/u/0/r/day/${year}/${month}/${day}`;
-                            window.open(url, "_blank", "noopener,noreferrer");
-                          } else {
-                            // Fallback to main calendar
-                            window.open("https://calendar.google.com", "_blank", "noopener,noreferrer");
+                            url = `https://calendar.google.com/calendar/r/day/${year}/${month}/${day}`;
                           }
+                          
+                          // Use simple window.open without extra parameters
+                          window.open(url, "_blank");
                         }}
                         size="small"
                         color="primary"
