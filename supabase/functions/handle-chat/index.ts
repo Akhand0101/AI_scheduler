@@ -402,9 +402,9 @@ async function aiConversation({
   }));
   contents.push({ role: "user", parts: [{ text: userMessage }] });
 
-  // FREE TIER OPTIMIZED: Use only one model to save quota
-  // gemini-1.5-flash has the best free tier limits (1500 req/day)
-  const PRIMARY_MODEL = "gemini-1.5-flash";
+  // FREE TIER OPTIMIZED: Use gemini-2.0-flash-001 which is available on v1beta
+  // See: https://ai.google.dev/gemini-api/docs/models/gemini
+  const PRIMARY_MODEL = "gemini-2.0-flash-001";
 
   let finalResponse = "";
   let bookingResult: any = null;
