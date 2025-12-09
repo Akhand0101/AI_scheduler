@@ -1151,6 +1151,43 @@ You matter, and help is available right now. Would you like me to help you find 
     msg.includes("insurance") || msg.includes("accept") ||
     msg.includes("cover") || msg.includes("payment")
   ) {
+    // Check if asking about a SPECIFIC therapist's insurance
+    const { data: therapistsForInsurance } = await supabaseClient
+      .from("therapists")
+      .select("id, name, accepted_insurance")
+      .eq("is_active", true);
+
+    if (therapistsForInsurance && therapistsForInsurance.length > 0) {
+      // Check if user mentioned any therapist name
+      const mentionedTherapist = therapistsForInsurance.find((t: any) => {
+        const firstName = t.name.split(" ")[0].toLowerCase();
+        const lastName = t.name.split(" ").pop()?.toLowerCase() || "";
+        return msg.includes(firstName) || msg.includes(lastName) ||
+          msg.includes(t.name.toLowerCase());
+      });
+
+      if (mentionedTherapist) {
+        const insurance = Array.isArray(mentionedTherapist.accepted_insurance)
+          ? mentionedTherapist.accepted_insurance.join("\n- ")
+          : "Information not available";
+
+        return {
+          success: true,
+          message:
+            `${mentionedTherapist.name} accepts the following insurance providers:
+
+- ${insurance}
+
+Would you like to book an appointment with ${mentionedTherapist.name}? Just say "book with ${
+              mentionedTherapist.name.split(" ")[0]
+            }" or tell me when you'd like to schedule!`,
+          therapistId: mentionedTherapist.id,
+          therapistName: mentionedTherapist.name,
+        };
+      }
+    }
+
+    // Generic insurance question (no specific therapist mentioned)
     return {
       success: true,
       message: `We accept these insurance providers:
