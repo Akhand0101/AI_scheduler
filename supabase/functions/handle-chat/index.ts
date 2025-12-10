@@ -428,12 +428,161 @@ async function handleConversation({
     }
   }
 
-  // Fallback to rule-based conversation
+  // ─────────────────────────────────────────────────────────────────────────────
+  // SMART CONTEXT EXTRACTION - Extract key info from conversation history
+  // ─────────────────────────────────────────────────────────────────────────────
+  const extractedContext = await extractConversationContext(
+    supabaseClient,
+    conversationHistory,
+    userMessage,
+  );
+
+  // Merge extracted context with base context
+  const enrichedContext = {
+    ...context,
+    conversationHistory,
+    ...extractedContext,
+  };
+
+  // Fallback to rule-based conversation with full context
   return await ruleBasedConversation({
     supabaseClient,
     userMessage,
-    context,
+    context: enrichedContext,
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧠 SMART CONTEXT EXTRACTOR - Understands what was discussed
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function extractConversationContext(
+  supabase: any,
+  conversationHistory: any[],
+  currentMessage: string,
+) {
+  // Combine all messages into one text for analysis
+  const allText = [
+    ...conversationHistory.map((m: any) => m.content || ""),
+    currentMessage,
+  ].join(" ").toLowerCase();
+
+  const extracted: any = {
+    selectedTherapist: null,
+    detectedProblem: null,
+    detectedInsurance: null,
+    requestedDate: null,
+    requestedTime: null,
+    conversationStage: "initial", // initial, exploring, therapist_selected, date_selected, booking
+  };
+
+  // ─── Detect Problem/Specialty ───
+  if (allText.includes("depress")) extracted.detectedProblem = "depression";
+  else if (allText.includes("anxi")) extracted.detectedProblem = "anxiety";
+  else if (allText.includes("trauma")) extracted.detectedProblem = "trauma";
+  else if (allText.includes("stress")) extracted.detectedProblem = "stress";
+  else if (allText.includes("relationship")) {
+    extracted.detectedProblem = "relationships";
+  } else if (allText.includes("grief") || allText.includes("loss")) {
+    extracted.detectedProblem = "grief";
+  }
+
+  // ─── Detect Insurance ───
+  const insuranceMap: Record<string, string> = {
+    "aetna": "Aetna",
+    "blue cross": "Blue Cross Blue Shield",
+    "cigna": "Cigna",
+    "united": "UnitedHealthcare",
+    "humana": "Humana",
+    "kaiser": "Kaiser Permanente",
+    "medicare": "Medicare",
+    "medicaid": "Medicaid",
+  };
+  for (const [key, value] of Object.entries(insuranceMap)) {
+    if (allText.includes(key)) {
+      extracted.detectedInsurance = value;
+      break;
+    }
+  }
+
+  // ─── Detect Selected Therapist ───
+  const { data: therapists } = await supabase
+    .from("therapists")
+    .select("id, name")
+    .eq("is_active", true);
+
+  if (therapists && therapists.length > 0) {
+    for (const t of therapists) {
+      const firstName = t.name.split(" ")[0].toLowerCase();
+      const lastName = t.name.split(" ")[1]?.toLowerCase().replace(/,.*/, "") ||
+        "";
+
+      // Check if therapist was mentioned AND user confirmed (look for patterns)
+      if (allText.includes(firstName) || allText.includes(lastName)) {
+        // Check for confirmation patterns - be very inclusive!
+        const confirmPatterns = [
+          // Direct confirmations
+          "works",
+          "fine",
+          "good",
+          "great",
+          "perfect",
+          "okay",
+          "ok",
+          "sounds good",
+          "looks good",
+          "looks fine",
+          "that one",
+          // Selection phrases
+          "book with",
+          "see " + firstName,
+          "choose",
+          "pick",
+          "select",
+          "go with",
+          "let's go",
+          "i'll take",
+          "i want",
+          // General affirmatives when therapist name is nearby
+          "yes",
+          "yeah",
+          "yep",
+          "sure",
+          "please",
+          // Pronouns after name mention
+          "her",
+          "him",
+          "them",
+          "this one",
+        ];
+        const hasConfirmation = confirmPatterns.some((p) =>
+          allText.includes(p) && allText.includes(firstName)
+        );
+
+        if (hasConfirmation || allText.includes(t.name.toLowerCase())) {
+          extracted.selectedTherapist = { id: t.id, name: t.name };
+          extracted.conversationStage = "therapist_selected";
+          break;
+        }
+      }
+    }
+  }
+
+  // ─── Detect Conversation Stage ───
+  if (extracted.selectedTherapist) {
+    // Check if date was mentioned after therapist selection
+    if (
+      /\d{1,2}(st|nd|rd|th)?|\bjan|\bfeb|\bmar|\bapr|\bmay|\bjun|\bjul|\baug|\bsep|\boct|\bnov|\bdec|\btomorrow|\btoday|\bmonday|\btuesday|\bwednesday|\bthursday|\bfriday/
+        .test(currentMessage.toLowerCase())
+    ) {
+      extracted.conversationStage = "date_selected";
+    }
+  } else if (extracted.detectedProblem || extracted.detectedInsurance) {
+    extracted.conversationStage = "exploring";
+  }
+
+  console.log("📊 Extracted context:", extracted);
+  return extracted;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1531,6 +1680,173 @@ async function ruleBasedConversation({
   const msg = userMessage.toLowerCase();
 
   // =====================================================
+  // PRIORITY 0: SMART CONTEXT CONTINUATION
+  // If we already know things from conversation history, continue naturally
+  // =====================================================
+
+  const {
+    selectedTherapist,
+    detectedProblem,
+    detectedInsurance,
+    conversationStage,
+  } = context;
+
+  // If we have a selected therapist and user mentions a date/time
+  if (selectedTherapist && conversationStage === "date_selected") {
+    console.log("🎯 Context continuation: Therapist selected + date mentioned");
+
+    // Parse the date
+    const parsedDate = parseFlexibleDate(msg);
+    const dateStr = parsedDate.toLocaleDateString("en-US", {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    });
+
+    // Check for weekend
+    const dayOfWeek = parsedDate.getDay();
+    if (dayOfWeek === 0 || dayOfWeek === 6) {
+      return {
+        success: true,
+        message:
+          `I noticed ${dateStr} falls on a weekend, and we're closed on weekends.
+
+Would you like to book with ${selectedTherapist.name} for the Monday after instead, or pick a different weekday?`,
+        therapistId: selectedTherapist.id,
+        therapistName: selectedTherapist.name,
+      };
+    }
+
+    // Generate available slots
+    const slots = [];
+    for (let hour = 9; hour < 17; hour++) {
+      const time = new Date(parsedDate);
+      time.setHours(hour, 0, 0, 0);
+      if (time > new Date()) {
+        slots.push({
+          time: `${hour > 12 ? hour - 12 : hour}:00 ${
+            hour >= 12 ? "PM" : "AM"
+          }`,
+          iso: time.toISOString(),
+        });
+      }
+    }
+
+    if (slots.length === 0) {
+      return {
+        success: true,
+        message:
+          `It looks like ${dateStr} doesn't have available slots (the day may have passed).
+
+Would you like to try a different date with ${selectedTherapist.name}?`,
+        therapistId: selectedTherapist.id,
+      };
+    }
+
+    const slotList = slots.slice(0, 6).map((s, i) => `${i + 1}. ${s.time}`)
+      .join("\n");
+
+    return {
+      success: true,
+      message:
+        `Perfect! Here are the available times for ${selectedTherapist.name} on ${dateStr}:
+
+${slotList}
+
+Which time works best for you? Just say the time like "10 AM" and I'll book it right away!`,
+      therapistId: selectedTherapist.id,
+      therapistName: selectedTherapist.name,
+      date: parsedDate.toISOString(),
+      availableSlots: slots,
+    };
+  }
+
+  // If user selected therapist but no date yet, and says something affirmative
+  if (
+    selectedTherapist && !conversationStage?.includes("date") &&
+    (msg.includes("yes") || msg.includes("ok") || msg.includes("sure") ||
+      msg.includes("go") || msg.includes("book"))
+  ) {
+    return {
+      success: true,
+      message: `Great choice! ${selectedTherapist.name} is wonderful.
+
+When would you like to schedule your appointment? You can say things like:
+- "Tomorrow at 2pm"
+- "Next Monday"
+- "December 23rd"
+
+What works for you?`,
+      therapistId: selectedTherapist.id,
+      therapistName: selectedTherapist.name,
+    };
+  }
+
+  // If we know their problem and insurance but no therapist yet, and they say "yes" or "find"
+  if (
+    !selectedTherapist && (detectedProblem || detectedInsurance) &&
+    (msg.includes("yes") || msg.includes("find") || msg.includes("show") ||
+      msg.includes("please") || msg.includes("go ahead"))
+  ) {
+    console.log(
+      "🎯 Context continuation: Problem/Insurance known, user wants to see therapists",
+    );
+
+    // Actually search for therapists
+    const { data: therapists } = await supabaseClient
+      .from("therapists")
+      .select("id, name, specialties, accepted_insurance")
+      .eq("is_active", true)
+      .limit(10);
+
+    if (therapists && therapists.length > 0) {
+      // Filter by problem
+      let filtered = therapists;
+      if (detectedProblem) {
+        const problemFiltered = therapists.filter((t: any) => {
+          const specs = Array.isArray(t.specialties)
+            ? t.specialties.join(" ").toLowerCase()
+            : "";
+          return specs.includes(detectedProblem);
+        });
+        if (problemFiltered.length > 0) filtered = problemFiltered;
+      }
+
+      // Filter by insurance
+      if (detectedInsurance && filtered.length > 0) {
+        const insFiltered = filtered.filter((t: any) => {
+          const ins = Array.isArray(t.accepted_insurance)
+            ? t.accepted_insurance.join(" ").toLowerCase()
+            : "";
+          return ins.includes(detectedInsurance.toLowerCase());
+        });
+        if (insFiltered.length > 0) filtered = insFiltered;
+      }
+
+      const top3 = filtered.slice(0, 3);
+      let response = `I found some excellent therapists`;
+      if (detectedProblem) response += ` who specialize in ${detectedProblem}`;
+      if (detectedInsurance) response += ` and accept ${detectedInsurance}`;
+      response += ":\n\n";
+
+      top3.forEach((t: any, i: number) => {
+        const specs = Array.isArray(t.specialties)
+          ? t.specialties.slice(0, 3).join(", ")
+          : "General";
+        response += `${i + 1}. **${t.name}** - Specializes in ${specs}\n`;
+      });
+
+      response += `\nWho would you like to book with? Just say their name!`;
+
+      return {
+        success: true,
+        message: response,
+        therapists: top3.map((t: any) => ({ id: t.id, name: t.name })),
+      };
+    }
+  }
+
+  // =====================================================
   // PRIORITY 1: CRISIS/SUICIDE DETECTION - Always check first!
   // =====================================================
   const crisisKeywords = [
@@ -1922,7 +2238,7 @@ What works best for you?`,
   }
 
   // =====================================================
-  // PRIORITY 9: DATE/TIME MENTIONED (wants to book)
+  // PRIORITY 9: DATE/TIME MENTIONED - Check availability!
   // =====================================================
   const dateWords = [
     "today",
@@ -1940,42 +2256,253 @@ What works best for you?`,
     "evening",
     "pm",
     "am",
+    "dec",
+    "december",
+    "jan",
+    "january",
+    "feb",
+    "february",
   ];
-  const hasDateMention = dateWords.some((d) => msg.includes(d));
+  // Also check for date patterns like "21st", "23rd", "15th"
+  const hasDateMention = dateWords.some((d) => msg.includes(d)) ||
+    /\d{1,2}(st|nd|rd|th)?/.test(msg);
 
   if (hasDateMention) {
+    // Check conversation history for recently mentioned therapist
+    const historyText = (context.conversationHistory || [])
+      .map((m: any) => m.content?.toLowerCase() || "")
+      .join(" ");
+
+    // Get all therapists to find mentioned ones
+    const { data: therapistsForDate } = await supabaseClient
+      .from("therapists")
+      .select("id, name")
+      .eq("is_active", true);
+
+    let matchedTherapist = null;
+
+    if (therapistsForDate && therapistsForDate.length > 0) {
+      // Check if any therapist was mentioned in conversation history
+      for (const t of therapistsForDate) {
+        const firstName = t.name.split(" ")[0].toLowerCase();
+        const lastName =
+          t.name.split(" ")[1]?.toLowerCase().replace(/,.*/, "") || "";
+
+        if (
+          historyText.includes(firstName) || historyText.includes(lastName) ||
+          msg.includes(firstName) || msg.includes(lastName)
+        ) {
+          matchedTherapist = t;
+          break;
+        }
+      }
+    }
+
+    if (matchedTherapist) {
+      // We have a therapist! Parse the date and check availability
+      console.log(
+        "📅 Date mentioned with therapist context:",
+        matchedTherapist.name,
+      );
+
+      // Parse the date from the message
+      const parsedDate = parseFlexibleDate(msg);
+      const dateStr = parsedDate.toLocaleDateString("en-US", {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+      });
+
+      // Check if it's a weekend
+      const dayOfWeek = parsedDate.getDay();
+      if (dayOfWeek === 0 || dayOfWeek === 6) {
+        return {
+          success: true,
+          message:
+            `I noticed ${dateStr} falls on a weekend, and we're closed on weekends. 
+
+Would you like to book for the Monday after instead, or pick a different weekday?`,
+          therapistId: matchedTherapist.id,
+          therapistName: matchedTherapist.name,
+        };
+      }
+
+      // Generate available slots (9 AM - 5 PM)
+      const slots = [];
+      for (let hour = 9; hour < 17; hour++) {
+        const time = new Date(parsedDate);
+        time.setHours(hour, 0, 0, 0);
+        if (time > new Date()) { // Only future slots
+          slots.push({
+            time: `${hour > 12 ? hour - 12 : hour}:00 ${
+              hour >= 12 ? "PM" : "AM"
+            }`,
+            iso: time.toISOString(),
+          });
+        }
+      }
+
+      if (slots.length === 0) {
+        return {
+          success: true,
+          message:
+            `It looks like ${dateStr} doesn't have available times (the day may have passed or it's too late in the day).
+
+Would you like to try a different date?`,
+          therapistId: matchedTherapist.id,
+        };
+      }
+
+      const slotList = slots.slice(0, 6).map((s, i) => `${i + 1}. ${s.time}`)
+        .join("\n");
+
+      return {
+        success: true,
+        message:
+          `Great! Here are the available times for ${matchedTherapist.name} on ${dateStr}:
+
+${slotList}
+
+Which time works best for you? Just say the time (like "10 AM" or "2 PM") and I'll book it!`,
+        therapistId: matchedTherapist.id,
+        therapistName: matchedTherapist.name,
+        date: parsedDate.toISOString(),
+        availableSlots: slots,
+      };
+    }
+
+    // No therapist in context - ask for one
     return {
       success: true,
       message: `I'd be happy to help you book for that time!
 
-To find the right slot, I need to know which therapist you'd like to see.
-
-Would you like me to:
-- Show all our therapists? (say "show therapists")
-- Help you find one based on your needs? (tell me what you're dealing with)
-
-What would you like to do?`,
+Which therapist would you like to see? You can say their name, or I can show you our available therapists.`,
     };
   }
 
   // =====================================================
-  // PRIORITY 10: YES/CONFIRM RESPONSES
+  // PRIORITY 10: YES/CONFIRM RESPONSES - Actually perform the action!
   // =====================================================
-  if (
-    msg === "yes" || msg === "yeah" || msg === "ok" || msg === "sure" ||
-    msg === "please"
-  ) {
+  const affirmativeWords = [
+    "yes",
+    "yeah",
+    "ok",
+    "sure",
+    "please",
+    "go ahead",
+    "yep",
+    "yup",
+  ];
+  const isAffirmative = affirmativeWords.some((w) => msg.includes(w)) ||
+    msg.includes("find") || msg.includes("show") ||
+    msg.includes("someone") || msg.includes("therapist");
+
+  if (isAffirmative) {
+    // Check conversation history for context about what to search for
+    const historyText = (context.conversationHistory || [])
+      .map((m: any) => m.content?.toLowerCase() || "")
+      .join(" ");
+
+    // Detect specialty from conversation
+    let specialty = null;
+    if (historyText.includes("depress") || msg.includes("depress")) {
+      specialty = "depression";
+    } else if (historyText.includes("anxi") || msg.includes("anxi")) {
+      specialty = "anxiety";
+    } else if (historyText.includes("trauma") || msg.includes("trauma")) {
+      specialty = "trauma";
+    } else if (historyText.includes("stress") || msg.includes("stress")) {
+      specialty = "stress";
+    } else if (
+      historyText.includes("relationship") || msg.includes("relationship")
+    ) specialty = "relationships";
+
+    // Detect insurance from conversation
+    let insuranceFilter = null;
+    const insuranceOptions = [
+      "aetna",
+      "blue cross",
+      "cigna",
+      "united",
+      "humana",
+      "kaiser",
+      "medicare",
+      "medicaid",
+    ];
+    for (const ins of insuranceOptions) {
+      if (historyText.includes(ins) || msg.includes(ins)) {
+        insuranceFilter = ins;
+        break;
+      }
+    }
+
+    // Fetch therapists matching the criteria
+    const { data: therapists } = await supabaseClient
+      .from("therapists")
+      .select("id, name, specialties, accepted_insurance, bio")
+      .eq("is_active", true)
+      .limit(10);
+
+    if (therapists && therapists.length > 0) {
+      // Filter by specialty if detected
+      let filtered = therapists;
+      if (specialty) {
+        filtered = therapists.filter((t: any) => {
+          const specs = Array.isArray(t.specialties)
+            ? t.specialties.join(" ").toLowerCase()
+            : "";
+          return specs.includes(specialty!);
+        });
+        // If no matches, fall back to all
+        if (filtered.length === 0) filtered = therapists;
+      }
+
+      // Filter by insurance if detected
+      if (insuranceFilter && filtered.length > 0) {
+        const insFiltered = filtered.filter((t: any) => {
+          const ins = Array.isArray(t.accepted_insurance)
+            ? t.accepted_insurance.join(" ").toLowerCase()
+            : "";
+          return ins.includes(insuranceFilter!);
+        });
+        if (insFiltered.length > 0) filtered = insFiltered;
+      }
+
+      // Build response with matched therapists
+      const top3 = filtered.slice(0, 3);
+      let response = specialty
+        ? `I found some great therapists who specialize in ${specialty}`
+        : "Here are some wonderful therapists who could help";
+
+      if (insuranceFilter) {
+        response += ` and accept ${
+          insuranceFilter.charAt(0).toUpperCase() + insuranceFilter.slice(1)
+        }`;
+      }
+      response += ":\n\n";
+
+      top3.forEach((t: any, i: number) => {
+        const specs = Array.isArray(t.specialties)
+          ? t.specialties.slice(0, 3).join(", ")
+          : "General";
+        response += `${i + 1}. **${t.name}** - Specializes in ${specs}\n`;
+      });
+
+      response +=
+        `\nWho would you like to learn more about or book with? Just say their name!`;
+
+      return {
+        success: true,
+        message: response,
+        therapists: top3.map((t: any) => ({ id: t.id, name: t.name })),
+      };
+    }
+
+    // Fallback if no therapists found
     return {
       success: true,
-      message: `Perfect! Let me help you find a therapist.
-
-What would you like help with? For example:
-- Anxiety or stress
-- Depression
-- Relationship issues
-- Life transitions
-
-Or just say "show therapists" to see our full team!`,
+      message:
+        `I'd love to help you find a therapist!\n\nWhat's been on your mind? For example:\n- Anxiety or stress\n- Depression\n- Relationship issues\n- Life transitions\n\nOr just say "show therapists" to see our full team!`,
     };
   }
 
@@ -2038,43 +2565,116 @@ async function getOrCreateInquiry(supabase: any, patientId: string) {
 
 function parseFlexibleDate(dateStr: string): Date {
   const str = dateStr.toLowerCase();
-  const date = new Date();
+  const today = new Date();
 
-  if (str === "today") {
-    return date;
+  // Handle relative days
+  if (str.includes("today")) return today;
+  if (str.includes("tomorrow")) {
+    const d = new Date(today);
+    d.setDate(today.getDate() + 1);
+    return d;
   }
-
-  if (str === "tomorrow") {
-    date.setDate(date.getDate() + 1);
-    return date;
-  }
-
   if (str.includes("next week")) {
-    date.setDate(date.getDate() + 7);
-    return date;
+    const d = new Date(today);
+    d.setDate(today.getDate() + 7);
+    return d;
   }
 
-  if (str.includes("monday")) {
-    const daysUntilMonday = (8 - date.getDay()) % 7 || 7;
-    date.setDate(date.getDate() + daysUntilMonday);
-    return date;
+  // Handle weekdays (next Monday, next Friday, etc.)
+  const days = [
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+  ];
+  for (let i = 0; i < 7; i++) {
+    if (str.includes(days[i])) {
+      const d = new Date(today);
+      const currentDay = today.getDay();
+      const targetDay = i;
+      let daysToAdd = targetDay - currentDay;
+      if (daysToAdd <= 0) daysToAdd += 7; // Next occurrence
+      d.setDate(today.getDate() + daysToAdd);
+      return d;
+    }
   }
 
-  if (str.includes("tuesday")) {
-    const daysUntilTuesday = (9 - date.getDay()) % 7 || 7;
-    date.setDate(date.getDate() + daysUntilTuesday);
-    return date;
+  // Regex for "29th Dec" or "Dec 29" or "29 December"
+  // Matches: 29th, 1st, 3, etc. followed by month (Jan, January) or vice versa
+  const months = [
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+  ];
+  const fullMonths = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+  ];
+
+  // Clean string: remove "st", "nd", "rd", "th" from numbers
+  const cleanStr = str.replace(/(\d+)(st|nd|rd|th)/g, "$1");
+
+  // Pattern A: "29 dec" or "29 december"
+  const dayMonthRegex = new RegExp(
+    `(\\d{1,2})\\s+(${months.join("|")}|${fullMonths.join("|")})`,
+    "i",
+  );
+  const matchA = cleanStr.match(dayMonthRegex);
+
+  if (matchA) {
+    const day = parseInt(matchA[1]);
+    const monthStr = matchA[2];
+    let month = months.findIndex((m) => monthStr.startsWith(m)); // 0-11
+
+    const d = new Date(today.getFullYear(), month, day);
+    if (d < today) d.setFullYear(today.getFullYear() + 1); // Next year if passed
+    return d;
   }
 
-  // Try ISO date
+  // Pattern B: "dec 29" or "december 29"
+  const monthDayRegex = new RegExp(
+    `(${months.join("|")}|${fullMonths.join("|")})\\s+(\\d{1,2})`,
+    "i",
+  );
+  const matchB = cleanStr.match(monthDayRegex);
+
+  if (matchB) {
+    const monthStr = matchB[1];
+    const day = parseInt(matchB[2]);
+    let month = months.findIndex((m) => monthStr.startsWith(m)); // 0-11
+
+    const d = new Date(today.getFullYear(), month, day);
+    if (d < today) d.setFullYear(today.getFullYear() + 1); // Next year if passed
+    return d;
+  }
+
+  // Last resort: basic Date parsing (might fail for complex strings)
   const parsed = new Date(dateStr);
-  if (!isNaN(parsed.getTime())) {
-    return parsed;
-  }
+  if (!isNaN(parsed.getTime())) return parsed;
 
-  // Default to tomorrow
-  date.setDate(date.getDate() + 1);
-  return date;
+  return today; // Fallback to today if all else fails
 }
 
 function jsonResponse(data: any, status = 200) {
