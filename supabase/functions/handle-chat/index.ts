@@ -1126,29 +1126,56 @@ async function toolCheckAvailableSlots(
     };
   }
 
-  // Get timezone offset for the user's timezone
-  // This calculates how many hours to adjust from UTC
-  const getTimezoneOffsetHours = (tz: string): number => {
+  // Get timezone offset for the user's timezone in MINUTES (to handle fractional hours like IST +5:30)
+  const getTimezoneOffsetMinutes = (tz: string): number => {
     const tzOffsets: Record<string, number> = {
-      "Asia/Kolkata": 5.5,
-      "America/New_York": -5,
-      "America/Chicago": -6,
-      "America/Denver": -7,
-      "America/Los_Angeles": -8,
+      "Asia/Kolkata": 330, // +5:30 = 330 minutes
+      "America/New_York": -300, // -5:00 = -300 minutes
+      "America/Chicago": -360, // -6:00 = -360 minutes
+      "America/Denver": -420, // -7:00 = -420 minutes
+      "America/Los_Angeles": -480, // -8:00 = -480 minutes
       "Europe/London": 0,
       "UTC": 0,
     };
     return tzOffsets[tz] ?? 0;
   };
 
-  const offsetHours = getTimezoneOffsetHours(timeZone);
-  console.log("Timezone offset (hours):", offsetHours);
+  const offsetMinutes = getTimezoneOffsetMinutes(timeZone);
+  console.log("Timezone offset (minutes):", offsetMinutes);
 
-  // Get appointments for that day
-  const dayStart = new Date(targetDate);
-  dayStart.setHours(9 - offsetHours, 0, 0, 0); // 9 AM in user's timezone converted to UTC
-  const dayEnd = new Date(targetDate);
-  dayEnd.setHours(17 - offsetHours, 0, 0, 0); // 5 PM in user's timezone converted to UTC
+  // Helper: Create a date at a specific hour in the user's timezone, stored as UTC
+  // For IST (UTC+5:30): 2 PM IST = 2 PM - 5:30 = 8:30 AM UTC
+  const createSlotTime = (baseDate: Date, localHour: number): Date => {
+    // Start with midnight UTC on that date
+    const slot = new Date(Date.UTC(
+      baseDate.getFullYear(),
+      baseDate.getMonth(),
+      baseDate.getDate(),
+      0,
+      0,
+      0,
+      0,
+    ));
+
+    // Add the local hour in milliseconds
+    const localTimeMs = localHour * 60 * 60 * 1000;
+
+    // Subtract offset to get UTC time
+    // IST is UTC+5:30, so 2 PM IST = 2 PM - 5:30 = 8:30 AM UTC
+    const offsetMs = offsetMinutes * 60 * 1000;
+
+    slot.setTime(slot.getTime() + localTimeMs - offsetMs);
+
+    console.log(
+      `🕐 createSlotTime: ${localHour}:00 ${timeZone} → ${slot.toISOString()} UTC`,
+    );
+
+    return slot;
+  };
+
+  // Get appointments for that day (9 AM to 5 PM in user's timezone)
+  const dayStart = createSlotTime(targetDate, 9);
+  const dayEnd = createSlotTime(targetDate, 17);
 
   const { data: appointments } = await supabase
     .from("appointments")
@@ -1160,11 +1187,8 @@ async function toolCheckAvailableSlots(
   // Generate hourly slots from 9 AM to 5 PM in USER'S TIMEZONE
   const slots: any[] = [];
   for (let hour = 9; hour < 17; hour++) {
-    const slotStart = new Date(targetDate);
-    // Convert user's local hour to UTC by subtracting the offset
-    slotStart.setHours(hour - offsetHours, 0, 0, 0);
-    const slotEnd = new Date(targetDate);
-    slotEnd.setHours(hour + 1 - offsetHours, 0, 0, 0);
+    const slotStart = createSlotTime(targetDate, hour);
+    const slotEnd = createSlotTime(targetDate, hour + 1);
 
     const isBooked = (appointments || []).some((apt: any) => {
       const aptStart = new Date(apt.start_time);
