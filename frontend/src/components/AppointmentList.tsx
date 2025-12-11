@@ -32,6 +32,28 @@ type Appointment = {
   therapist_name?: string | null;
 };
 
+// Helper function to format dates in the user's local timezone
+const formatDateTime = (isoString: string | null | undefined): string => {
+  if (!isoString) return "-";
+  
+  try {
+    const date = new Date(isoString);
+    // Format in India Standard Time
+    return date.toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+  } catch {
+    return isoString;
+  }
+};
+
 export default function AppointmentList() {
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(false);
@@ -129,8 +151,8 @@ export default function AppointmentList() {
             <TableBody>
               {appointments.map((a) => (
                 <TableRow key={a.id} sx={{ '&:last-child td, &:last-child th': { border: 0 } }}>
-                  <TableCell>{a.start_time ? new Date(a.start_time).toLocaleString() : "-"}</TableCell>
-                  <TableCell>{a.end_time ? new Date(a.end_time).toLocaleString() : "-"}</TableCell>
+                  <TableCell>{formatDateTime(a.start_time)}</TableCell>
+                  <TableCell>{formatDateTime(a.end_time)}</TableCell>
                   <TableCell>{a.therapist_name ?? a.therapist_id ?? "-"}</TableCell>
                   <TableCell>{a.patient_identifier ?? "-"}</TableCell>
                   <TableCell>{a.status ?? "-"}</TableCell>
